@@ -1347,6 +1347,7 @@ dependencies = [
 name = "wgpu_compute_harness"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "encase",
  "extended_morton_coder",
  "futures-intrusive",
