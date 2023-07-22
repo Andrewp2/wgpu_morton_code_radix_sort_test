@@ -2,7 +2,6 @@ use std::{
     borrow::Cow,
     cmp::PartialEq,
     ops::{Add, Rem, Sub},
-    time::Instant,
 };
 
 use encase::{private::WriteInto, ShaderType, StorageBuffer, UniformBuffer};
@@ -543,6 +542,12 @@ fn create_bind_group(
 }
 
 async fn run() {
+    env_logger::init();
+    log::error!("errors on");
+    log::warn!("warn on");
+    log::info!("info on");
+    log::debug!("debug on");
+    log::trace!("trace on");
     let instance = Instance::new(InstanceDescriptor {
         backends: Backends::all(),
         dx12_shader_compiler: Default::default(),
@@ -560,6 +565,7 @@ async fn run() {
         .await
         .unwrap();
     let info = adapter.get_info();
+    println!("backend: {:?}", info.backend);
     device.on_uncaptured_error(Box::new(move |error| {
         println!("{}", &error);
         panic!(
