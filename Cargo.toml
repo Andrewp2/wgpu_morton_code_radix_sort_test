@@ -15,3 +15,4 @@ encase = { version = "0.6.1", features = ["glam"] }
 extended_morton_coder = "0.1.0"
 rand = "0.8.5"
 bytemuck = "1.9.0"
+easy-cast = "0.5.2"

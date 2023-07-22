@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     cmp::PartialEq,
     ops::{Add, Rem, Sub},
+    time::Instant,
 };
 
 use encase::{private::WriteInto, ShaderType, StorageBuffer, UniformBuffer};
@@ -19,7 +20,7 @@ use wgpu::{
 const NUM_VERTICES: u32 = 1000u32;
 const NUM_TRIANGLES: u32 = 2000u32;
 const BITS_PER_PASS: u32 = 6;
-const NUM_VALS_IN_RADIX_PASS: u32 = 1 << BITS_PER_PASS;
+const HISTOGRAM_SIZE: u32 = 1 << BITS_PER_PASS;
 const WORKGROUP_SIZE: u32 = 256u32;
 const ITEMS_PROCESSED_PER_LANE_HISTOGRAM_PASS: u32 = 1u32;
 const ITEMS_PER_HISTOGRAM_PASS: u32 = WORKGROUP_SIZE * ITEMS_PROCESSED_PER_LANE_HISTOGRAM_PASS;
@@ -96,8 +97,28 @@ fn create_buffer<T: ShaderType + WriteInto>(
     final_buffer
 }
 
+/// Divides l by r, and takes the ceiling instead of the floor.
+fn div_ceil_u32(l: u32, r: u32) -> u32 {
+    return (l + r - 1) / r;
+}
+
+/// Divids l by r and takes the ceiling instead of the floor.
+fn div_ceil_u64(l: u64, r: u64) -> u64 {
+    return (l + r - 1) / r;
+}
+
+/// Calculates the number of workgroups needed to handle all the elements.
+fn calculate_number_of_workgroups_u32(element_count: u32, workgroup_size: u32) -> u32 {
+    return div_ceil_u32(element_count, workgroup_size);
+}
+
+// Calculates the number of workgroups needed to handle all the elements.
+fn calculate_number_of_workgroups_u64(element_count: u64, workgroup_size: u64) -> u64 {
+    return div_ceil_u64(element_count, workgroup_size);
+}
+
 /// Calculates the next multiple of a u32 number, such that l % r == 0.
-fn next_multiple_of_u32<T: Rem<Output = T> + PartialEq<u32> + Add<Output = T> + Sub<Output = T>>(
+fn round_up_u32<T: Rem<Output = T> + PartialEq<u32> + Add<Output = T> + Sub<Output = T> + Copy>(
     l: T,
     r: T,
 ) -> T {
@@ -109,7 +130,7 @@ fn next_multiple_of_u32<T: Rem<Output = T> + PartialEq<u32> + Add<Output = T> + 
 }
 
 /// Calculates the next multiple of a u64 number, such that l % r == 0.
-fn next_multiple_of_u64<T: Rem<Output = T> + PartialEq<u64> + Add<Output = T> + Sub<Output = T>>(
+fn round_up_u64<T: Rem<Output = T> + PartialEq<u64> + Add<Output = T> + Sub<Output = T> + Copy>(
     l: T,
     r: T,
 ) -> T {
@@ -192,14 +213,13 @@ fn create_morton_uniforms(morton_code_generator: &MortonCodeGenerator) -> Morton
         .iter()
         .flat_map(|x| x.iter().flat_map(|y| [(*y >> 0) as u32, (*y >> 32) as u32]))
         .collect();
-    if lut.len() != 4608 {
-        panic!("lut wrong length");
-    }
+    assert!(lut.len() == 4608, "lut is the wrong length");
     let size_lut: Vec<u32> = morton_code_generator
         .size_lut
         .iter()
         .flat_map(|x| [(*x >> 0) as u32, (*x >> 32) as u32])
         .collect();
+    assert!(size_lut.len() == 8192);
     MortonUniforms {
         lut: lut.try_into().unwrap(),
         size_lut: size_lut.try_into().unwrap(),
@@ -211,49 +231,61 @@ fn create_morton_uniforms(morton_code_generator: &MortonCodeGenerator) -> Morton
 }
 
 /// Calculates the size and number of large prefix buffers needed to radix sort that number of elements.
-fn calculate_size_of_large_prefix_passes(num_elements: u64) -> Vec<u64> {
-    // Multiply by number of values per radix pass becuase
-    let histogram_value_count: u64 =
-        (num_elements * NUM_VALS_IN_RADIX_PASS as u64) / ITEMS_PER_HISTOGRAM_PASS as u64;
-    let mut x = histogram_value_count;
-    x = next_multiple_of_u64(x, WORKGROUP_SIZE as u64);
-    println!("x {}", x);
-    // assuming that x < MAX_ITEMS_IN_SMALL_PREFIX, we need 1 small prefix pass and 0 large prefix passes.
-    // Ergo the number of default large prefix passes is 0.
-    let mut ret = vec![];
-    // while the number of elements we're processing is larger than the maximum we can handle in a small prefix pass
-    while x > MAX_ITEMS_IN_SMALL_PREFIX as u64 {
-        // do another large prefix pass
-        ret.push(x);
-        // divide the number of elements by the number of elements reduced in a single large prefix workgroup
-        x /= ITEMS_PER_LARGE_PREFIX as u64;
-        // round up the number of elements to the next 256 to not break anything
-        x = next_multiple_of_u64(x, WORKGROUP_SIZE as u64);
+fn calculate_num_items_prefix_buffers(num_elements: u64) -> Vec<u64> {
+    // Multiply by number of values per radix pass because on the first pass we produce a histogram
+    // of size NUM_VALS_IN_RADIX_PASS.
+    // That means that technically we're dividing by a factor of 4.
+    let mut num_items_in_buffer: u64 =
+        calculate_number_of_workgroups_u64(num_elements, ITEMS_PER_HISTOGRAM_PASS as u64)
+            * HISTOGRAM_SIZE as u64;
+    // we need to round up to the nearest 256 as the large prefix pass assumes that a buffer size is always a multiple of 256
+    num_items_in_buffer = round_up_u64(num_items_in_buffer, ITEMS_PER_LARGE_PREFIX as u64);
+    if num_items_in_buffer <= MAX_ITEMS_IN_SMALL_PREFIX as u64 {
+        // In this case, we don't need to create any prefix buffers as we can directly perform a small prefix sum on
+        // the histogram buffer.
+        println!(
+            "no prefix buffers necessary, as number of workgroups is {}, and total size is {}",
+            calculate_number_of_workgroups_u64(num_elements, ITEMS_PER_HISTOGRAM_PASS as u64),
+            num_items_in_buffer
+        );
+        return vec![];
     }
-    return ret;
+    let mut num_items_in_buffers = vec![];
+    // While the number of elements we're processing is larger than the maximum we can handle in a small prefix pass
+    while num_items_in_buffer > MAX_ITEMS_IN_SMALL_PREFIX as u64 {
+        println!("number of elements in buffer {}", num_items_in_buffer);
+        // Do another large prefix pass
+        num_items_in_buffers.push(num_items_in_buffer);
+        // Divide the number of elements by the number of elements reduced in a single large prefix workgroup
+        // This is guaranteed to produce an integer, as we already rounded up to the next multiple of ITEMS_PER_LARGE_PREFIX.
+        num_items_in_buffer /= ITEMS_PER_LARGE_PREFIX as u64;
+        // Round up the number of elements to the next 256 to not break anything
+        num_items_in_buffer = round_up_u64(num_items_in_buffer, ITEMS_PER_LARGE_PREFIX as u64);
+    }
+    println!("num_items_in_large_buffers: {:?}", num_items_in_buffers);
+    // Now that we have all the large prefix buffers, let's create the small one. We know there will always be at least one
+    // if we got this point.
+    // We might have 0 large prefix buffers and 1 small, 1 large 1 small, N large 1 small
+    num_items_in_buffers.push(num_items_in_buffer);
+    return num_items_in_buffers;
 }
 
 /// Creates buffers for prefix sum in radix sort.
 fn create_prefix_buffers(device: &Device) -> Vec<Buffer> {
     let mut prefix_sum_buffers: Vec<Buffer> = vec![];
-    let buffer_sizes = calculate_size_of_large_prefix_passes(NUM_TRIANGLES as u64);
+    // This is the number of elements in LARGE buffers. It doesn't include the last number of elements
+    let buffers_num_items = calculate_num_items_prefix_buffers(NUM_TRIANGLES as u64);
+    // size of a u32 is 4 bytes
     let bytes_per_element = 4u64;
-    for b_size in buffer_sizes {
+    // Create all the buffers
+    for number_of_items_in_buffer in &buffers_num_items {
         prefix_sum_buffers.push(device.create_buffer(&BufferDescriptor {
-            label: Some(format!("large prefix sum buffer {b_size}").as_str()),
-            size: b_size * bytes_per_element,
+            label: Some(format!("prefix sum buffer {number_of_items_in_buffer}").as_str()),
+            size: number_of_items_in_buffer * bytes_per_element,
             usage: BufferUsages::STORAGE,
             mapped_at_creation: false,
         }));
     }
-    let last_buffer_num_elements = ((buffer_sizes.last().unwrap() * NUM_VALS_IN_RADIX_PASS as u64)
-        / ITEMS_PER_HISTOGRAM_PASS as u64);
-    prefix_sum_buffers.push(device.create_buffer(&BufferDescriptor {
-        label: Some("small prefix sum buffer"),
-        size: last_buffer_num_elements * bytes_per_element,
-        usage: BufferUsages::STORAGE,
-        mapped_at_creation: false,
-    }));
     prefix_sum_buffers
 }
 
@@ -527,8 +559,18 @@ async fn run() {
         .request_device(&Default::default(), None)
         .await
         .unwrap();
+    let info = adapter.get_info();
+    device.on_uncaptured_error(Box::new(move |error| {
+        println!("{}", &error);
+        panic!(
+            "wgpu error (handling all wgpu errors as fatal):\n{:?}\n{:?}",
+            &error, &info,
+        );
+    }));
+
+    device.start_capture();
     // region: create triangles and morton code generator
-    let (vertices, triangles, morton_code_generator, vertices_copy, triangles_copy) =
+    let (vertices, triangles, morton_code_generator, _vertices_copy, _triangles_copy) =
         create_scene();
     // endregion
     // region: creating buffers
@@ -539,15 +581,9 @@ async fn run() {
         "morton uniform buffer",
         BufferUsages::STORAGE,
     );
-    let triangle_2_b = device.create_buffer(&BufferDescriptor {
-        label: Some("vertices 2 buffer"),
-        size: triangles.size().into(),
-        usage: BufferUsages::STORAGE,
-        mapped_at_creation: false,
-    });
     let histogram_b = device.create_buffer(&BufferDescriptor {
         label: Some("original histogram buffer"),
-        size: next_multiple_of_u32(NUM_TRIANGLES, 256u32) as u64,
+        size: round_up_u32(NUM_TRIANGLES, 256u32) as u64,
         usage: BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
@@ -556,7 +592,7 @@ async fn run() {
     let indices_b = create_buffer(triangles, &device, "indices buffer", BufferUsages::STORAGE);
     let indices_2_b = device.create_buffer(&BufferDescriptor {
         label: Some("second indices buffer"),
-        size: vertices_b.size(),
+        size: indices_b.size(),
         usage: BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
@@ -578,6 +614,20 @@ async fn run() {
     });
 
     let radix_uniforms_b = create_radix_uniforms_buffer(&device, 0);
+
+    // let morton_code_readback_b = device.create_buffer(&BufferDescriptor {
+    //     label: Some("morton code readback buffer"),
+    //     size: morton_code_b_size,
+    //     usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+    //     mapped_at_creation: false,
+    // });
+
+    let radix_sort_readback_b = device.create_buffer(&BufferDescriptor {
+        label: Some("radix_sort_readback_b"),
+        size: morton_code_2_b.size(),
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
 
     // endregion
     // region: shader modules
@@ -610,12 +660,6 @@ async fn run() {
         source: ShaderSource::Wgsl(Cow::Borrowed(include_str!("radix_sort_scatter.wgsl"))),
     });
 
-    let morton_code_readback_b = device.create_buffer(&BufferDescriptor {
-        label: Some("morton code readback buffer"),
-        size: morton_code_b_size,
-        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
     // endregion
     // region: bind group layouts
     let morton_code_l = create_morton_code_bind_group_layout(&device);
@@ -648,7 +692,7 @@ async fn run() {
     });
 
     let radix_prefix_large_p = device.create_compute_pipeline(&ComputePipelineDescriptor {
-        label: Some("morton cdoe compute pipeline"),
+        label: Some("radix prefix large pipeline"),
         layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Compute Pipeline Layout"),
             bind_group_layouts: &[&radix_prefix_large_l],
@@ -659,7 +703,7 @@ async fn run() {
     });
 
     let radix_prefix_large_p_2 = device.create_compute_pipeline(&ComputePipelineDescriptor {
-        label: Some("morton cdoe compute pipeline"),
+        label: Some("radix prefix large pipeline 2"),
         layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Compute Pipeline Layout"),
             bind_group_layouts: &[&radix_prefix_large_l],
@@ -717,30 +761,35 @@ async fn run() {
     let mut radix_prefix_large_bind_groups = vec![];
 
     if !prefix_sum_bs.is_empty() {
+        println!("prefix_sum_bs was not empty");
         radix_prefix_large_bind_groups.push(create_bind_group(
             &device,
             radix_prefix_large_l,
             vec![&histogram_b, &prefix_sum_bs[0]],
             "radix sort prefix sum large bind group",
-        ))
-    }
-
-    for i in 0..prefix_sum_bs.len() - 1 {
-        radix_prefix_large_bind_groups.push(create_bind_group(
-            &device,
-            create_radix_bgl_prefix_large(&device),
-            vec![&prefix_sum_bs[i], &prefix_sum_bs[i + 1]],
-            "radix sort prefix sum large bind group",
         ));
+        for i in 0..prefix_sum_bs.len() - 1 {
+            radix_prefix_large_bind_groups.push(create_bind_group(
+                &device,
+                create_radix_bgl_prefix_large(&device),
+                vec![&prefix_sum_bs[i], &prefix_sum_bs[i + 1]],
+                "radix sort prefix sum large bind group",
+            ));
+        }
+    } else {
+        println!("We don't have any prefix sum buffers so we don't need any bindgroups to them, but we still need to create a small bind group on the histogram");
     }
 
     let radix_prefix_small_bg = match prefix_sum_bs.is_empty() {
-        true => create_bind_group(
-            &device,
-            radix_prefix_small_l,
-            vec![&histogram_b],
-            "radix sort prefix sum small bind group",
-        ),
+        true => {
+            println!("Create a small bind group directly on the histogram buffer");
+            create_bind_group(
+                &device,
+                radix_prefix_small_l,
+                vec![&histogram_b],
+                "radix sort prefix sum small bind group",
+            )
+        }
         false => create_bind_group(
             &device,
             radix_prefix_small_l,
@@ -762,7 +811,6 @@ async fn run() {
         ],
         "radix sort scatter bind group",
     );
-
     // endregion
     // region: encoder
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
@@ -777,54 +825,134 @@ async fn run() {
         compute_pass.set_pipeline(&morton_code_p);
         compute_pass.set_bind_group(0, &morton_code_bg, &[]);
         compute_pass.insert_debug_marker("compute morton code");
-        compute_pass.dispatch_workgroups(
-            next_multiple_of_u32(NUM_TRIANGLES.try_into().unwrap(), 64) / 64,
-            1,
-            1,
-        );
+        let number_of_workgroups =
+            calculate_number_of_workgroups_u32(NUM_TRIANGLES, ITEMS_PER_HISTOGRAM_PASS);
+        assert!(number_of_workgroups == 8);
+        compute_pass.dispatch_workgroups(number_of_workgroups, 1, 1);
 
         compute_pass.set_pipeline(&radix_histogram_p);
         compute_pass.set_bind_group(0, &radix_histogram_bg, &[]);
-        // TODO: Fix # dispatched workgroups
-        compute_pass.dispatch_workgroups(
-            next_multiple_of_u32(NUM_TRIANGLES.try_into().unwrap(), 256) / 256,
-            1,
-            1,
-        );
+        compute_pass.dispatch_workgroups(number_of_workgroups, 1, 1);
 
+        let buffer_num_items = calculate_num_items_prefix_buffers(NUM_TRIANGLES as u64);
         compute_pass.set_pipeline(&radix_prefix_large_p);
-        radix_prefix_large_bind_groups.iter().for_each(|large_bg| {
-            compute_pass.set_bind_group(0, &large_bg, &[]);
-            compute_pass.dispatch_workgroups(1, 1, 1);
-        });
+        assert!(buffer_num_items.len() == radix_prefix_large_bind_groups.len());
+        radix_prefix_large_bind_groups
+            .iter()
+            .enumerate()
+            .for_each(|(i, large_bg)| {
+                println!("running a large prefix bind group {}", i);
+                compute_pass.set_bind_group(0, &large_bg, &[]);
+                println!(
+                    "id: {} number of workgroups dispatched: {}",
+                    i,
+                    ((buffer_num_items[i]) / ITEMS_PER_LARGE_PREFIX as u64)
+                );
+                compute_pass.dispatch_workgroups(
+                    ((buffer_num_items[i]) / ITEMS_PER_LARGE_PREFIX as u64)
+                        .try_into()
+                        .unwrap(),
+                    1,
+                    1,
+                );
+            });
 
+        println!("run the small prefix bind group");
         compute_pass.set_pipeline(&radix_prefix_small_p);
         compute_pass.set_bind_group(0, &radix_prefix_small_bg, &[]);
         compute_pass.dispatch_workgroups(1, 1, 1);
 
-        compute_pass.set_pipeline(&radix_prefix_large_p);
-        radix_prefix_large_bind_groups.iter().for_each(|large_bg| {
-            compute_pass.set_bind_group(0, &large_bg, &[]);
-            compute_pass.dispatch_workgroups(1, 1, 1);
-        });
+        compute_pass.set_pipeline(&radix_prefix_large_p_2);
+        radix_prefix_large_bind_groups
+            .iter()
+            .enumerate()
+            .rev()
+            .for_each(|(i, large_bg)| {
+                println!("run large prefix bind group cleanup pass {}", i);
+                compute_pass.set_bind_group(0, &large_bg, &[]);
+                compute_pass.dispatch_workgroups(
+                    ((buffer_num_items[i]) / ITEMS_PER_LARGE_PREFIX as u64)
+                        .try_into()
+                        .unwrap(),
+                    1,
+                    1,
+                );
+            });
 
+        println!("scatter final results");
         compute_pass.set_pipeline(&radix_scatter_p);
         compute_pass.set_bind_group(0, &radix_scatter_bg, &[]);
-        compute_pass.dispatch_workgroups(1, 1, 1);
+        compute_pass.dispatch_workgroups(number_of_workgroups, 1, 1);
     }
+    // encoder.copy_buffer_to_buffer(
+    //     &morton_code_b,
+    //     0,
+    //     &morton_code_readback_b,
+    //     0,
+    //     (NUM_TRIANGLES * 8).try_into().unwrap(),
+    // );
     encoder.copy_buffer_to_buffer(
-        &morton_code_b,
+        &morton_code_2_b,
         0,
-        &morton_code_readback_b,
+        &radix_sort_readback_b,
         0,
-        (NUM_TRIANGLES * 8).try_into().unwrap(),
+        morton_code_2_b.size(),
     );
     // endregion
+    println!("submit");
     queue.submit(Some(encoder.finish()));
     // We need to scope the mapping variables so that we can
     // unmap the buffer
+    // {
+    //     let buffer_slice = morton_code_readback_b.slice(..);
+    //     // NOTE: We have to create the mapping THEN device.poll() before await
+    //     // the future. Otherwise the application will freeze.
+    //     let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
+    //     buffer_slice.map_async(MapMode::Read, move |result| {
+    //         tx.send(result).unwrap();
+    //     });
+    //     device.poll(Maintain::Wait);
+    //     if let Some(Ok(())) = rx.receive().await {
+    //         let data = buffer_slice.get_mapped_range();
+    //         let result: Vec<u64> = bytemuck::cast_slice(&data).to_vec();
+    //         drop(data);
+    //         morton_code_readback_b.unmap();
+    //         for (i, compute_code) in result.iter().enumerate() {
+    //             let indices = triangles_copy.triangles[i];
+    //             let min = vertices_copy.vertices[indices.indices.x as usize]
+    //                 .position
+    //                 .min(
+    //                     vertices_copy.vertices[indices.indices.y as usize]
+    //                         .position
+    //                         .min(vertices_copy.vertices[indices.indices.z as usize].position),
+    //                 );
+    //             let max = vertices_copy.vertices[indices.indices.x as usize]
+    //                 .position
+    //                 .max(
+    //                     vertices_copy.vertices[indices.indices.y as usize]
+    //                         .position
+    //                         .max(vertices_copy.vertices[indices.indices.z as usize].position),
+    //                 );
+    //             let expected = morton_code_generator.code(min, max);
+    //             if *compute_code != expected {
+    //                 if (compute_code ^ expected > 1000u64) {
+    //                     println!(
+    //                         "compute code and real code are not close {}\n{:#066b}\n{:#066b}\n{:#066b}\n{}",
+    //                         i,
+    //                         compute_code,
+    //                         expected,
+    //                         compute_code ^ expected,
+    //                         compute_code ^ expected,
+    //                     );
+    //                 }
+    //             }
+    //         }
+    //     } else {
+    //         panic!("failed to run compute on GPU!!!!!");
+    //     }
+    // }
     {
-        let buffer_slice = morton_code_readback_b.slice(..);
+        let buffer_slice = radix_sort_readback_b.slice(..);
         // NOTE: We have to create the mapping THEN device.poll() before await
         // the future. Otherwise the application will freeze.
         let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
@@ -836,37 +964,34 @@ async fn run() {
             let data = buffer_slice.get_mapped_range();
             let result: Vec<u64> = bytemuck::cast_slice(&data).to_vec();
             drop(data);
-            morton_code_readback_b.unmap();
-            for (i, compute_code) in result.iter().enumerate() {
-                let indices = triangles_copy.triangles[i];
-                let min = vertices_copy.vertices[indices.indices.x as usize]
-                    .position
-                    .min(
-                        vertices_copy.vertices[indices.indices.y as usize]
-                            .position
-                            .min(vertices_copy.vertices[indices.indices.z as usize].position),
-                    );
-                let max = vertices_copy.vertices[indices.indices.x as usize]
-                    .position
-                    .max(
-                        vertices_copy.vertices[indices.indices.y as usize]
-                            .position
-                            .max(vertices_copy.vertices[indices.indices.z as usize].position),
-                    );
-                let expected = morton_code_generator.code(min, max);
-                if *compute_code != expected {
-                    // println!(
-                    //     "compute code and real code do not match exactly {}\n{:#066b}\n{}",
-                    //     i,
-                    //     (compute_code ^ expected),
-                    //     (compute_code ^ expected)
-                    // );
+            radix_sort_readback_b.unmap();
+            let mut sorted = true;
+            let mut all_zero = true;
+            println!("results length: {}", result.len());
+            for i in result.windows(2) {
+                let before = i[0];
+                let after = i[1];
+                if before > after {
+                    sorted = false;
                 }
+                if before != 0u64 {
+                    all_zero = false;
+                }
+                if after != 0u64 {
+                    all_zero = false;
+                }
+            }
+            if !sorted {
+                println!("Not sorted!!!");
+            }
+            if all_zero {
+                println!("all zero!!!");
             }
         } else {
             panic!("failed to run compute on GPU!!!!!");
         }
     }
+    device.stop_capture();
 }
 
 fn create_radix_uniforms_buffer(device: &Device, pass_number: u32) -> Buffer {
@@ -879,11 +1004,27 @@ fn create_radix_uniforms_buffer(device: &Device, pass_number: u32) -> Buffer {
     let radix_uniforms_b = device.create_buffer_init(&BufferInitDescriptor {
         label: Some("radix uniforms buffer"),
         contents: radix_uniforms_temp_buf_ub.as_ref(),
-        usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::STORAGE,
+        usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::UNIFORM,
     });
     radix_uniforms_b
 }
 
 fn main() {
     pollster::block_on(run());
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::calculate_number_of_workgroups_u32;
+
+    #[test]
+    fn workgroup_calculation() {
+        assert_eq!(calculate_number_of_workgroups_u32(0, 256), 0, "i: {}", 0);
+        for i in 1..256 {
+            assert_eq!(calculate_number_of_workgroups_u32(i, 256), 1, "i: {}", i);
+        }
+        for i in 257..512 {
+            assert_eq!(calculate_number_of_workgroups_u32(i, 256), 2, "i: {}", i);
+        }
+    }
 }

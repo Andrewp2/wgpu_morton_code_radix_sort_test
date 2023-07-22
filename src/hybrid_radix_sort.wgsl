@@ -65,10 +65,10 @@ var<storage, read> codes_2: array<u32>;
 @group(0) @binding(5)
 var<storage, read_write> block_histograms: array<BlockHistogram>;
 
-var<workgroup, read_write> histogram: array<atomic<u32>, 256>;
-var<workgroup, read_write> histogram_prefix_sum: array<u32, 256>;
+var<workgroup> histogram: array<atomic<u32>, 256>;
+var<workgroup> histogram_prefix_sum: array<u32, 256>;
 
-// var<workgroup, read_write> shared_mem: array<u32, MERGING_BUCKET_THRESHOLD>;
+// var<workgroup> shared_mem: array<u32, MERGING_BUCKET_THRESHOLD>;
 
 // Returns the offset needed to avoid a bank offset
 fn bank_offset(index: u32) -> u32 {

@@ -62,6 +62,7 @@ fn morton_code(
 ) {
     if invocation_id.x > arrayLength(&indices) {
         return;
+    } else {
     }
     let vert_1: vec3<f32> = vertices[indices[invocation_id.x].tri_indices.x].position;
     let vert_2: vec3<f32> = vertices[indices[invocation_id.x].tri_indices.y].position;

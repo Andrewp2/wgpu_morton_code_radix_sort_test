@@ -10,7 +10,7 @@ var<storage, read_write> vals: array<u32>;
 @group(0) @binding(1)
 var<storage, read_write> block_sums: array<u32>;
 
-var<workgroup, read_write> scratch: array<u32, 256>;
+var<workgroup> scratch: array<u32, 256>;
 
 fn prefix_sum_swap(wid: u32, lo: u32, hi: u32) {
     let before = scratch[wid + lo];
@@ -68,6 +68,9 @@ fn radix_sort_block_sum_large_after(
     @builtin(num_workgroups) num_workgroups: vec3<u32>
 ) {
     let id = invocation_id.x;
+    if id < arrayLength(&vals) {
+        vals[id] += block_sums[(id / 256u) - 1u];
+    }
     if id > 256u {
         vals[id] += block_sums[(id / 256u) - 1u];
     }

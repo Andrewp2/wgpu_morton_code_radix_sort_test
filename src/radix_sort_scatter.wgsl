@@ -34,9 +34,9 @@ var<storage, read_write> codes_2: array<u32>;
 @group(0) @binding(5)
 var<storage, read_write> storage_histograms: array<u32>;
 
-var<workgroup, read_write> histogram: array<atomic<u32>, 64>;
-var<workgroup, read_write> histogram_na: array<u32, 64>;
-var<workgroup, read_write> sorting_scratch: array<u32, 256>;
+var<workgroup> histogram: array<atomic<u32>, 64>;
+var<workgroup> histogram_na: array<u32, 64>;
+var<workgroup> sorting_scratch: array<u32, 256>;
 
 var<private> local_id: u32;
 
@@ -106,7 +106,7 @@ fn div_ceil(a: u32, b: u32) -> u32 {
 fn cmp_and_swap(wid: u32, lo: u32, hi: u32) {
     if sorting_scratch[lo] > sorting_scratch[hi] {
         if wid < 128u {
-            let x = sorting_scratch[hi]
+            let x = sorting_scratch[hi];
             sorting_scratch[hi] = sorting_scratch[lo];
             sorting_scratch[lo] = x;
         }

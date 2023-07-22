@@ -36,8 +36,8 @@ var<storage, read> codes_2: array<u32>;
 @group(0) @binding(5)
 var<storage, read_write> storage_histograms: array<u32>;
 
-var<workgroup, read_write> histogram: array<atomic<u32>, 64>;
-//var<workgroup, read_write> histogram_na: array<u32, 64>;
+var<workgroup> histogram: array<atomic<u32>, 64>;
+//var<workgroup> histogram_na: array<u32, 64>;
 
 fn select_digit(id: u32) -> u32 {
     var val = 64u;
@@ -126,22 +126,8 @@ fn radix_sort_compute_histogram(
     workgroupBarrier();
     if wid < 64u {
         //prefix_sum_block_exclusive(wid, id, atomicLoad(&histogram[wid]), 64u);
-        // 0-255 256-511
-        // 0-63 256-319 512-576
-        // bottom is top - (192 * num blocks)
-        // 0-63 64-127 128-191
-        // dividing by 4 because 256 / 64 = 4
-        // if there are 10,000,000 elements then - 
-        // 10,000,000 / 256 = 39,062.5
-        // 10,000,000 * 64 = 2,500,000
-        // BUT 2,500,000 isn't divisible by 256
-        // 2,500,032 is though, its 256 * 192
 
-        // div_ceil(10,000,000, 256) = 39,063
-        // 39,063 * 64 = 2,500,032
-        // this is row major order, putting all 64 bits next to each other
-        //storage_histograms[id - num_blocks_before_this * 192u] = histogram_na[wid];
-        let storage_histogram_index = (div_ceil(num_elements, 256u) * 4u) * wid + num_blocks_before_this;
+        let storage_histogram_index = num_workgroups.x * wid + num_blocks_before_this;
         storage_histograms[storage_histogram_index] = atomicLoad(&histogram[wid]);
     }
 }

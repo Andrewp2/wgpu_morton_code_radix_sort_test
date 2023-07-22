@@ -8,7 +8,7 @@ const BITS_PER_DIGIT = 5u;
 @group(0) @binding(0)
 var<storage, read_write> block_sums: array<u32>;
 
-var<workgroup, read_write> scratch: array<u32, 256>;
+var<workgroup> scratch: array<u32, 256>;
 
 fn prefix_sum_swap(wid: u32, lo: u32, hi: u32) {
     let before = scratch[wid + lo];
