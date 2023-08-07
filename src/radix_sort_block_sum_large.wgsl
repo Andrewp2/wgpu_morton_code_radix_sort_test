@@ -57,8 +57,9 @@ fn radix_sort_block_sum_large(
     prefix_sum_block_exclusive(wid, id);
     if wid == 255u {
         block_sums[id / 256u] = scratch[wid] + vals[id];
+        //block_sums[id / 256u] = scratch[wid] + vals[id];
     }
-    vals[id] += scratch[wid];
+    vals[id] = scratch[wid];
 }
 
 @compute @workgroup_size(256, 1, 1)
@@ -69,9 +70,6 @@ fn radix_sort_block_sum_large_after(
 ) {
     let id = invocation_id.x;
     if id < arrayLength(&vals) {
-        vals[id] += block_sums[(id / 256u) - 1u];
-    }
-    if id > 256u {
-        vals[id] += block_sums[(id / 256u) - 1u];
+        vals[id] += block_sums[(id / 256u)];
     }
 }

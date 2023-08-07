@@ -37,67 +37,41 @@ var<storage, read> codes_2: array<u32>;
 var<storage, read_write> storage_histograms: array<u32>;
 
 var<workgroup> histogram: array<atomic<u32>, 64>;
-//var<workgroup> histogram_na: array<u32, 64>;
+
+// 0: 1 -> 2
+// 1: 2 -> 1
+// 2: 1 -> 2
+// 3: 2 -> 1
+// 4: 1 -> 2
+// 5: 2 -> 1
+// 6: 1 -> 2
+// 7: 2 -> 1
+// 8: 1 -> 2
+// 9: 2 -> 1
+// 10: 1 -> 2
+
 
 fn select_digit(id: u32) -> u32 {
     var val = 64u;
-    // 0      1      2        3        4        5
-    // [0, 4] [5, 9] [10, 14] [15, 19] [20, 24] [25, 29]
-    // 6 
-    // [30, 34]
-    // 7        8        9        10       11       12 
-    // [35, 39] [40, 44] [45, 49] [50, 54] [55, 59] [60, 63]
-    if uniforms.pass_number < 6u {
-        if uniforms.pass_number % 2u == 0u {
-            val = (codes[2u * id + 1u] >> (uniforms.pass_number * 5u)) & 63u;
+    // determines if we're using the ping-pong buffer or not
+    let use_original_array = uniforms.pass_number % 2u == 0u;
+    if uniforms.pass_number < 5u {
+        if use_original_array {
+            val = (codes[2u * id + 0u] >> (uniforms.pass_number * 6u)) & 63u;
         } else {
-            val = (codes_2[2u * id + 1u] >> (uniforms.pass_number * 5u)) & 63u;
+            val = (codes_2[2u * id + 0u] >> (uniforms.pass_number * 6u)) & 63u;
         }
-    } else if uniforms.pass_number > 6u {
-        if uniforms.pass_number % 2u == 0u {
-            val = (codes[2u * id] >> (uniforms.pass_number * 5u + 2u)) & 63u;
+    } else if uniforms.pass_number > 5u {
+        if use_original_array {
+            val = (codes[2u * id + 1u] >> ((uniforms.pass_number - 6u) * 6u + 4u)) & 63u;
         } else {
-            val = (codes_2[2u * id] >> (uniforms.pass_number * 5u + 2u)) & 63u;
+            val = (codes_2[2u * id + 1u] >> ((uniforms.pass_number - 6u) * 6u + 4u)) & 63u;
         }
     } else {
-        val = ((codes[2u * id + 1u] >> 30u) & 3u) | ((codes[2u * id]) & 7u);
+        val = ((codes_2[2u * id + 0u] >> 30u) & 3u) | (((codes_2[2u * id + 1u]) & 15u) << 2u);
     }
     return val;
 }
-
-//fn prefix_sum_swap(wid: u32, lo: u32, hi: u32) {
-//    let before = histogram_na[wid + lo];
-//    let after = histogram_na[wid + hi];
-//    histogram_na[wid + lo] = after;
-//    histogram_na[wid + hi] += before;
-//}
-//
-//fn prefix_sum_block_exclusive(wid: u32, id: u32, v: u32, prefix_sum_size: u32) {
-//    histogram_na[wid] = v;
-//    for (var i: u32 = 1u; i < prefix_sum_size; i = i << 1u) {
-//        workgroupBarrier();
-//        if wid % (2u * i) == 0u {
-//            histogram_na[wid + (2u * i) - 1u] += histogram_na[wid + i - 1u];
-//        }
-//    }
-//    workgroupBarrier();
-//    // special case for first iteration
-//    if wid % prefix_sum_size == 0u {
-//        block_sums[id / 256u] = histogram_na[prefix_sum_size - 1u];
-//        let before = histogram_na[(prefix_sum_size / 2u) - 1u];
-//
-//        histogram_na[(prefix_sum_size / 2u) - 1u] = 0u;
-//        histogram_na[prefix_sum_size - 1u] = before;
-//    }
-//    // 128 64 32 16 8 4 2
-//    for (var i: u32 = prefix_sum_size / 2u; i > 1u; i = i >> 1u) {
-//        workgroupBarrier();
-//        if wid % i == 0u {
-//            prefix_sum_swap(wid, (i / 2u) - 1u, i - 1u);
-//        }
-//    }
-//    workgroupBarrier();
-//}
 
 fn div_ceil(a: u32, b: u32) -> u32 {
     return (a + b - 1u) / b;

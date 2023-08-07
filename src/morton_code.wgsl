@@ -62,7 +62,6 @@ fn morton_code(
 ) {
     if invocation_id.x > arrayLength(&indices) {
         return;
-    } else {
     }
     let vert_1: vec3<f32> = vertices[indices[invocation_id.x].tri_indices.x].position;
     let vert_2: vec3<f32> = vertices[indices[invocation_id.x].tri_indices.y].position;
@@ -73,10 +72,10 @@ fn morton_code(
     let j = u32(length(max - min) * uniforms.size_multiplier);
     let b: u32 = 0xFFu;
 
-    let morton_hi = uniforms.lut[translate_coords_lut(0, i32(p.x & b), 0)] | uniforms.lut[translate_coords_lut(1, i32(p.y & b), 0)] | uniforms.lut[translate_coords_lut(2, i32(p.z & b), 0)] | uniforms.lut[translate_coords_lut(3, i32((p.x >> 8u) & b), 0)] | uniforms.lut[translate_coords_lut(4, i32((p.y >> 8u) & b), 0)] | uniforms.lut[translate_coords_lut(5, i32((p.z >> 8u) & b), 0)] | uniforms.lut[translate_coords_lut(6, i32((p.x >> 16u) & b), 0)] | uniforms.lut[translate_coords_lut(7, i32((p.y >> 16u) & b), 0)] | uniforms.lut[translate_coords_lut(8, i32((p.z >> 16u) & b), 0)] | uniforms.size_lut[i32(j * 2u)];
+    let morton_lo = uniforms.lut[translate_coords_lut(0, i32(p.x & b), 0)] | uniforms.lut[translate_coords_lut(1, i32(p.y & b), 0)] | uniforms.lut[translate_coords_lut(2, i32(p.z & b), 0)] | uniforms.lut[translate_coords_lut(3, i32((p.x >> 8u) & b), 0)] | uniforms.lut[translate_coords_lut(4, i32((p.y >> 8u) & b), 0)] | uniforms.lut[translate_coords_lut(5, i32((p.z >> 8u) & b), 0)] | uniforms.lut[translate_coords_lut(6, i32((p.x >> 16u) & b), 0)] | uniforms.lut[translate_coords_lut(7, i32((p.y >> 16u) & b), 0)] | uniforms.lut[translate_coords_lut(8, i32((p.z >> 16u) & b), 0)] | uniforms.size_lut[i32(j * 2u)];
 
-    let morton_lo = uniforms.lut[translate_coords_lut(0, i32(p.x & b), 1)] | uniforms.lut[translate_coords_lut(1, i32(p.y & b), 1)] | uniforms.lut[translate_coords_lut(2, i32(p.z & b), 1)] | uniforms.lut[translate_coords_lut(3, i32((p.x >> 8u) & b), 1)] | uniforms.lut[translate_coords_lut(4, i32((p.y >> 8u) & b), 1)] | uniforms.lut[translate_coords_lut(5, i32((p.z >> 8u) & b), 1)] | uniforms.lut[translate_coords_lut(6, i32((p.x >> 16u) & b), 1)] | uniforms.lut[translate_coords_lut(7, i32((p.y >> 16u) & b), 1)] | uniforms.lut[translate_coords_lut(8, i32((p.z >> 16u) & b), 1)] | uniforms.size_lut[i32(j * 2u) + 1];
+    let morton_hi = uniforms.lut[translate_coords_lut(0, i32(p.x & b), 1)] | uniforms.lut[translate_coords_lut(1, i32(p.y & b), 1)] | uniforms.lut[translate_coords_lut(2, i32(p.z & b), 1)] | uniforms.lut[translate_coords_lut(3, i32((p.x >> 8u) & b), 1)] | uniforms.lut[translate_coords_lut(4, i32((p.y >> 8u) & b), 1)] | uniforms.lut[translate_coords_lut(5, i32((p.z >> 8u) & b), 1)] | uniforms.lut[translate_coords_lut(6, i32((p.x >> 16u) & b), 1)] | uniforms.lut[translate_coords_lut(7, i32((p.y >> 16u) & b), 1)] | uniforms.lut[translate_coords_lut(8, i32((p.z >> 16u) & b), 1)] | uniforms.size_lut[i32(j * 2u) + 1];
 
-    morton_codes[(invocation_id.x * 2u) + 1u] = morton_lo;
-    morton_codes[(invocation_id.x * 2u) + 0u] = morton_hi;
+    morton_codes[(invocation_id.x * 2u) + 0u] = morton_lo;
+    morton_codes[(invocation_id.x * 2u) + 1u] = morton_hi;
 }
