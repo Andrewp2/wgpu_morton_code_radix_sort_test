@@ -792,15 +792,28 @@ async fn run() {
         label: Some("command encoder"),
     });
 
+    let morton_code_bg: BindGroup = create_bind_group(
+        &device,
+        &morton_code_l,
+        vec![&morton_uniforms_b, &vertices_b, &indices_b, &morton_code_b],
+        "morton code bind group",
+    );
+
+    {
+        let compute_pass_desc = ComputePassDescriptor {
+            label: Some("Compute Pass"),
+        };
+        let mut compute_pass = encoder.begin_compute_pass(&compute_pass_desc);
+        compute_pass.set_pipeline(&morton_code_p);
+        compute_pass.set_bind_group(0, &morton_code_bg, &[]);
+        compute_pass.insert_debug_marker("compute morton code");
+        // morton code dispatch is only 64 wide, not a full 256.
+        compute_pass.dispatch_workgroups(div_ceil_u32(NUM_TRIANGLES, 64), 1, 1);
+    }
+
     for i in 0..11 {
         let radix_uniforms_b = create_radix_uniforms_buffer(&device, i);
         // region: bind groups
-        let morton_code_bg: BindGroup = create_bind_group(
-            &device,
-            &morton_code_l,
-            vec![&morton_uniforms_b, &vertices_b, &indices_b, &morton_code_b],
-            "morton code bind group",
-        );
         let radix_histogram_bg = create_bind_group(
             &device,
             &radix_histogram_l,
@@ -874,16 +887,9 @@ async fn run() {
         // endregion
         {
             let compute_pass_desc = ComputePassDescriptor {
-                label: Some("Compute Pass"),
+                label: Some("Compute Pass 2"),
             };
-            //println!("num workgroups {}", number_of_workgroups);
             let mut compute_pass = encoder.begin_compute_pass(&compute_pass_desc);
-            compute_pass.set_pipeline(&morton_code_p);
-            compute_pass.set_bind_group(0, &morton_code_bg, &[]);
-            compute_pass.insert_debug_marker("compute morton code");
-            // morton code dispatch is only 64 wide, not a full 256.
-            compute_pass.dispatch_workgroups(div_ceil_u32(NUM_TRIANGLES, 64), 1, 1);
-
             compute_pass.set_pipeline(&radix_histogram_p);
             compute_pass.set_bind_group(0, &radix_histogram_bg, &[]);
             compute_pass.insert_debug_marker("histogram pass");
@@ -895,7 +901,7 @@ async fn run() {
 
         {
             let compute_pass_desc = ComputePassDescriptor {
-                label: Some("Compute Pass 2"),
+                label: Some("Compute Pass 3"),
             };
             let mut compute_pass = encoder.begin_compute_pass(&compute_pass_desc);
             let buffer_num_items = calculate_num_items_prefix_buffers(NUM_TRIANGLES as u64);
