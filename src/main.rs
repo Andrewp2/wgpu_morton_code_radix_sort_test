@@ -581,6 +581,7 @@ async fn run() {
             &error, &info,
         );
     }));
+    device.start_capture();
     let number_of_workgroups =
         calculate_number_of_workgroups_u32(NUM_TRIANGLES, ITEMS_PER_HISTOGRAM_PASS);
     // region: create triangles and morton code generator
@@ -677,8 +678,6 @@ async fn run() {
         usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-
-    device.start_capture();
 
     // endregion
     // region: shader modules
@@ -801,7 +800,7 @@ async fn run() {
 
     {
         let compute_pass_desc = ComputePassDescriptor {
-            label: Some("Compute Pass"),
+            label: Some("Morton Coding"),
         };
         let mut compute_pass = encoder.begin_compute_pass(&compute_pass_desc);
         compute_pass.set_pipeline(&morton_code_p);
@@ -886,10 +885,11 @@ async fn run() {
         );
         // endregion
         {
-            let compute_pass_desc = ComputePassDescriptor {
-                label: Some("Compute Pass 2"),
-            };
-            let mut compute_pass = encoder.begin_compute_pass(&compute_pass_desc);
+            let mut compute_pass = encoder.begin_compute_pass(
+                &(ComputePassDescriptor {
+                    label: Some("Histogram calculation"),
+                }),
+            );
             compute_pass.set_pipeline(&radix_histogram_p);
             compute_pass.set_bind_group(0, &radix_histogram_bg, &[]);
             compute_pass.insert_debug_marker("histogram pass");
@@ -900,10 +900,11 @@ async fn run() {
         copy_buffer_to_buffer(&mut encoder, &histogram_b, &histogram_readback_b);
 
         {
-            let compute_pass_desc = ComputePassDescriptor {
-                label: Some("Compute Pass 3"),
-            };
-            let mut compute_pass = encoder.begin_compute_pass(&compute_pass_desc);
+            let mut compute_pass = encoder.begin_compute_pass(
+                &(ComputePassDescriptor {
+                    label: Some("Large Prefix Sum part 1"),
+                }),
+            );
             let buffer_num_items = calculate_num_items_prefix_buffers(NUM_TRIANGLES as u64);
             compute_pass.set_pipeline(&radix_prefix_large_p);
             assert!(buffer_num_items.len() == radix_prefix_large_bind_groups.len());
@@ -926,14 +927,28 @@ async fn run() {
                 // );
                 compute_pass.dispatch_workgroups(prefix_workgroup as u32, 1, 1);
             }
-
+        }
+        {
+            let mut compute_pass = encoder.begin_compute_pass(
+                &(ComputePassDescriptor {
+                    label: Some("Small Prefix Sum"),
+                }),
+            );
             log::info!("run the small prefix bind group");
             compute_pass.set_pipeline(&radix_prefix_small_p);
             compute_pass.set_bind_group(0, &radix_prefix_small_bg, &[]);
             compute_pass.insert_debug_marker("small prefix");
             compute_pass.dispatch_workgroups(1, 1, 1);
-
+        }
+        {
+            let mut compute_pass = encoder.begin_compute_pass(
+                &(ComputePassDescriptor {
+                    label: Some("Large Prefix Sum part 2"),
+                }),
+            );
             compute_pass.set_pipeline(&radix_prefix_large_p_2);
+
+            let buffer_num_items = calculate_num_items_prefix_buffers(NUM_TRIANGLES as u64);
 
             for i in (0..radix_prefix_large_bind_groups.len()).rev() {
                 let index = i;
@@ -953,7 +968,13 @@ async fn run() {
                 // );
                 compute_pass.dispatch_workgroups(prefix_workgroup as u32, 1, 1);
             }
-
+        }
+        {
+            let mut compute_pass = encoder.begin_compute_pass(
+                &(ComputePassDescriptor {
+                    label: Some("Final Scatter"),
+                }),
+            );
             log::info!("scatter final results");
             compute_pass.set_pipeline(&radix_scatter_p);
             compute_pass.set_bind_group(0, &radix_scatter_bg, &[]);
