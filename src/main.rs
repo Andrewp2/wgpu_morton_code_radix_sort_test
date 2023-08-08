@@ -250,11 +250,6 @@ fn calculate_num_items_prefix_buffers(num_elements: u64) -> Vec<u64> {
     if num_items_in_buffer <= MAX_ITEMS_IN_SMALL_PREFIX as u64 {
         // In this case, we don't need to create any prefix buffers as we can directly perform a small prefix sum on
         // the histogram buffer.
-        // println!(
-        //     "no prefix buffers necessary, as number of workgroups is {}, and total size is {}",
-        //     calculate_number_of_workgroups_u64(num_elements, ITEMS_PER_HISTOGRAM_PASS as u64),
-        //     num_items_in_buffer
-        // );
         return vec![];
     }
     num_items_in_buffer /= 256;
@@ -262,7 +257,6 @@ fn calculate_num_items_prefix_buffers(num_elements: u64) -> Vec<u64> {
     let mut num_items_in_buffers = vec![];
     // While the number of elements we're processing is larger than the maximum we can handle in a small prefix pass
     while num_items_in_buffer > MAX_ITEMS_IN_SMALL_PREFIX as u64 {
-        //println!("number of elements in buffer {}", num_items_in_buffer);
         // Do another large prefix pass
         num_items_in_buffers.push(num_items_in_buffer);
         // Divide the number of elements by the number of elements reduced in a single large prefix workgroup
@@ -271,12 +265,10 @@ fn calculate_num_items_prefix_buffers(num_elements: u64) -> Vec<u64> {
         // Round up the number of elements to the next 256 to not break anything
         num_items_in_buffer = round_up_u64(num_items_in_buffer, ITEMS_PER_LARGE_PREFIX as u64);
     }
-    //println!("num_items_in_large_buffers: {:?}", num_items_in_buffers);
     // Now that we have all the large prefix buffers, let's create the small one. We know there will always be at least one
     // if we got this point.
     // We might have 0 large prefix buffers and 1 small, 1 large 1 small, N large 1 small
     num_items_in_buffers.push(num_items_in_buffer);
-    //println!("all prefix buffers: {:?}", num_items_in_buffers);
     return num_items_in_buffers;
 }
 
@@ -554,8 +546,6 @@ fn create_bind_group(
 
 async fn run() {
     env_logger::init();
-    #[cfg(histogram_readback)]
-    log::info!("histogram_readback");
     let instance = Instance::new(InstanceDescriptor {
         backends: Backends::all(),
         dx12_shader_compiler: Default::default(),
@@ -585,10 +575,6 @@ async fn run() {
     let number_of_workgroups =
         calculate_number_of_workgroups_u32(NUM_TRIANGLES, ITEMS_PER_HISTOGRAM_PASS);
     // region: create triangles and morton code generator
-    #[cfg(morton_code_readback)]
-    let (vertices, triangles, morton_code_generator, vertices_copy, triangles_copy) =
-        create_scene();
-    #[cfg(not(morton_code_readback))]
     let (vertices, triangles, morton_code_generator, _vertices_copy, _triangles_copy) =
         create_scene();
     assert_eq!(triangles.triangles.len(), NUM_TRIANGLES as usize);
@@ -601,13 +587,7 @@ async fn run() {
         "morton uniform buffer",
         BufferUsages::STORAGE,
     );
-
     let histogram_buffer_number_elements = round_up_u32(number_of_workgroups * HISTOGRAM_SIZE, 256);
-    //println!(
-    //     "histogram buffer num elements {}",
-    //     histogram_buffer_number_elements
-    // );
-
     let histogram_b = device.create_buffer(&BufferDescriptor {
         label: Some("original histogram buffer"),
         size: (histogram_buffer_number_elements * 4) as u64,
@@ -624,7 +604,6 @@ async fn run() {
         mapped_at_creation: false,
     });
     let morton_code_size: u64 = (std::mem::size_of::<u64>()).try_into().unwrap();
-    // 4000 u32s
     let morton_code_b_size = morton_code_size * NUM_TRIANGLES as u64;
     let morton_code_b = device.create_buffer(&BufferDescriptor {
         label: Some("morton code buffer"),
@@ -639,46 +618,6 @@ async fn run() {
         usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
-
-    #[cfg(any(morton_code_readback, histogram_readback))]
-    let morton_code_readback_b = device.create_buffer(&BufferDescriptor {
-        label: Some("morton code readback buffer"),
-        size: morton_code_b_size,
-        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    #[cfg(radix_sort_readback)]
-    let radix_sort_morton_codes_readback_b = device.create_buffer(&BufferDescriptor {
-        label: Some("radix_sort_morton_codes_readback_b"),
-        size: morton_code_b_size,
-        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    #[cfg(radix_sort_readback)]
-    let radix_sort_morton_codes_2_readback_b = device.create_buffer(&BufferDescriptor {
-        label: Some("radix_sort_morton_codes_2_readback_b"),
-        size: morton_code_b_size,
-        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    #[cfg(any(histogram_readback, prefix_sum_readback))]
-    let histogram_readback_b = device.create_buffer(&BufferDescriptor {
-        label: Some("histogram_readback_b"),
-        size: histogram_b.size(),
-        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    #[cfg(prefix_sum_readback)]
-    let prefix_sum_readback_b = device.create_buffer(&BufferDescriptor {
-        label: Some("prefix_sum_readback_b"),
-        size: histogram_b.size(),
-        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
     // endregion
     // region: shader modules
     let morton_module = device.create_shader_module(ShaderModuleDescriptor {
@@ -786,7 +725,6 @@ async fn run() {
     });
 
     // endregion
-    // region: encoder
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
         label: Some("command encoder"),
     });
@@ -812,7 +750,7 @@ async fn run() {
 
     for i in 0..11 {
         let radix_uniforms_b = create_radix_uniforms_buffer(&device, i);
-        // region: bind groups
+
         let radix_histogram_bg = create_bind_group(
             &device,
             &radix_histogram_l,
@@ -859,15 +797,12 @@ async fn run() {
                     "radix sort prefix sum small bind group",
                 )
             }
-            false => {
-                //println!("doing the bind group on a small prefix buffer instead of histogram");
-                create_bind_group(
-                    &device,
-                    &radix_prefix_small_l,
-                    vec![&prefix_sum_bs.last().unwrap()],
-                    "radix sort prefix sum small bind group",
-                )
-            }
+            false => create_bind_group(
+                &device,
+                &radix_prefix_small_l,
+                vec![&prefix_sum_bs.last().unwrap()],
+                "radix sort prefix sum small bind group",
+            ),
         };
 
         let radix_scatter_bg = create_bind_group(
@@ -895,10 +830,6 @@ async fn run() {
             compute_pass.insert_debug_marker("histogram pass");
             compute_pass.dispatch_workgroups(number_of_workgroups, 1, 1);
         }
-
-        #[cfg(prefix_sum_readback)]
-        copy_buffer_to_buffer(&mut encoder, &histogram_b, &histogram_readback_b);
-
         {
             let mut compute_pass = encoder.begin_compute_pass(
                 &(ComputePassDescriptor {
@@ -921,10 +852,6 @@ async fn run() {
                     ),
                     _ => div_ceil_u64(buffer_num_items[i - 1], ITEMS_PER_LARGE_PREFIX as u64),
                 };
-                //println!(
-                //     "id: {}, number of workgroups dispatched: {}",
-                //     i, prefix_workgroup
-                // );
                 compute_pass.dispatch_workgroups(prefix_workgroup as u32, 1, 1);
             }
         }
@@ -962,10 +889,6 @@ async fn run() {
                     ),
                     _ => div_ceil_u64(buffer_num_items[i - 1], ITEMS_PER_LARGE_PREFIX as u64),
                 };
-                //println!(
-                //     "id: {}, run large prefix bind group cleanup pass: {}",
-                //     index, prefix_workgroup
-                // );
                 compute_pass.dispatch_workgroups(prefix_workgroup as u32, 1, 1);
             }
         }
@@ -982,551 +905,10 @@ async fn run() {
             compute_pass.dispatch_workgroups(number_of_workgroups, 1, 1);
         }
     }
-    #[cfg(morton_code_readback)]
-    copy_buffer_to_buffer(&mut encoder, &morton_code_b, &morton_code_readback_b);
-    #[cfg(histogram_readback)]
-    {
-        copy_buffer_to_buffer(&mut encoder, &morton_code_b, &morton_code_readback_b);
-        copy_buffer_to_buffer(&mut encoder, &histogram_b, &histogram_readback_b);
-    }
-    #[cfg(radix_sort_readback)]
-    copy_buffer_to_buffer(
-        &mut encoder,
-        &morton_code_b,
-        &radix_sort_morton_codes_readback_b,
-    );
-    #[cfg(radix_sort_readback)]
-    copy_buffer_to_buffer(
-        &mut encoder,
-        &morton_code_2_b,
-        &radix_sort_morton_codes_2_readback_b,
-    );
-
-    #[cfg(prefix_sum_readback)]
-    copy_buffer_to_buffer(&mut encoder, &histogram_b, &prefix_sum_readback_b);
-
-    // endregion
     log::info!("submit");
     queue.submit(Some(encoder.finish()));
 
     device.stop_capture();
-    // We need to scope the mapping variables so that we can
-    // unmap the buffer
-    #[cfg(morton_code_readback)]
-    {
-        let morton_code_readback_slice = morton_code_readback_b.slice(..);
-        // NOTE: We have to create the mapping THEN device.poll() before await
-        // the future. Otherwise the application will freeze.
-        let (morton_code_tx, morton_code_rx) =
-            futures_intrusive::channel::shared::oneshot_channel();
-        morton_code_readback_slice.map_async(MapMode::Read, move |result| {
-            morton_code_tx.send(result).unwrap();
-        });
-        device.poll(Maintain::Wait);
-        if let Some(Ok(())) = morton_code_rx.receive().await {
-            let morton_code_data = morton_code_readback_slice.get_mapped_range();
-            let morton_codes: Vec<u64> = bytemuck::cast_slice(&morton_code_data).to_vec();
-            drop(morton_code_data);
-            morton_code_readback_b.unmap();
-            for (i, compute_code) in morton_codes.iter().enumerate() {
-                let indices = triangles_copy.triangles[i];
-                let min = vertices_copy.vertices[indices.indices.x as usize]
-                    .position
-                    .min(
-                        vertices_copy.vertices[indices.indices.y as usize]
-                            .position
-                            .min(vertices_copy.vertices[indices.indices.z as usize].position),
-                    );
-                let max = vertices_copy.vertices[indices.indices.x as usize]
-                    .position
-                    .max(
-                        vertices_copy.vertices[indices.indices.y as usize]
-                            .position
-                            .max(vertices_copy.vertices[indices.indices.z as usize].position),
-                    );
-                let expected = morton_code_generator.code(min, max);
-                if *compute_code != expected {
-                    if compute_code ^ expected > 1000u64 {
-                        //println!(
-                        //     "compute code and real code are not close {}\n{:#066b}\n{:#066b}\n{:#066b}\n{}",
-                        //     i,
-                        //     compute_code,
-                        //     expected,
-                        //     compute_code ^ expected,
-                        //     compute_code ^ expected,
-                        // );
-                    }
-                }
-            }
-        } else {
-            panic!("failed to run compute on GPU!!!!!");
-        }
-    }
-    #[cfg(histogram_readback)]
-    {
-        let histogram_readback_slice = histogram_readback_b.slice(..);
-        let morton_code_readback_slice = morton_code_readback_b.slice(..);
-        // NOTE: We have to create the mapping THEN device.poll() before await
-        // the future. Otherwise the application will freeze.
-        let (histogram_tx, histogram_rx) = futures_intrusive::channel::shared::oneshot_channel();
-        let (morton_code_tx, morton_code_rx) =
-            futures_intrusive::channel::shared::oneshot_channel();
-        histogram_readback_slice.map_async(MapMode::Read, move |result| {
-            histogram_tx.send(result).unwrap();
-        });
-        morton_code_readback_slice.map_async(MapMode::Read, move |result| {
-            morton_code_tx.send(result).unwrap();
-        });
-        device.poll(Maintain::Wait);
-        if let (Some(Ok(())), Some(Ok(()))) =
-            (histogram_rx.receive().await, morton_code_rx.receive().await)
-        {
-            let morton_code_data = morton_code_readback_slice.get_mapped_range();
-            let morton_codes: Vec<u64> = bytemuck::cast_slice(&morton_code_data).to_vec();
-            drop(morton_code_data);
-            morton_code_readback_b.unmap();
-            let histogram_data = histogram_readback_slice.get_mapped_range();
-            let histogram_vals: Vec<u32> = bytemuck::cast_slice(&histogram_data).to_vec();
-            drop(histogram_data);
-            histogram_readback_b.unmap();
-
-            let mut full_manual_histogram: Vec<u32> =
-                vec![0; (number_of_workgroups * HISTOGRAM_SIZE) as usize];
-            assert_eq!(
-                (number_of_workgroups * HISTOGRAM_SIZE) as usize,
-                histogram_vals.len()
-            );
-
-            for (chunk_id, morton_codes_workgroup) in morton_codes.chunks(256).enumerate() {
-                let mut manual_histogram: Vec<u32> = vec![0; 64];
-                for (i, mc) in morton_codes_workgroup.iter().enumerate() {
-                    let digit = mc & 63;
-                    //println!("digit: {:#08b}, chunk_id: {}, wid: {}", digit, chunk_id, i);
-                    manual_histogram[digit as usize] += 1;
-                }
-                for (i, h) in manual_histogram.iter().enumerate() {
-                    full_manual_histogram[i * (number_of_workgroups as usize) + chunk_id] = *h;
-                }
-            }
-            for (i, histogram_val) in full_manual_histogram.iter().enumerate() {
-                let compute_value = histogram_vals[i];
-                assert_eq!(*histogram_val, compute_value);
-                // print!("{}, {}\t", histogram_val, compute_value);
-                // if (i as u32) % number_of_workgroups == 7 {
-                //println!("");
-                // }
-            }
-        } else {
-            panic!("compute didn't run properly");
-        }
-    }
-    #[cfg(prefix_sum_readback)]
-    {
-        let histogram_readback_slice = histogram_readback_b.slice(..);
-        let prefix_sum_readback_slice = prefix_sum_readback_b.slice(..);
-        // NOTE: We have to create the mapping THEN device.poll() before await
-        // the future. Otherwise the application will freeze.
-        let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
-        prefix_sum_readback_slice.map_async(MapMode::Read, move |result| {
-            tx.send(result).unwrap();
-        });
-        let (histogram_tx, histogram_rx) = futures_intrusive::channel::shared::oneshot_channel();
-        histogram_readback_slice.map_async(MapMode::Read, move |result| {
-            histogram_tx.send(result).unwrap();
-        });
-        device.poll(Maintain::Wait);
-        if let (Some(Ok(())), Some(Ok(()))) = (rx.receive().await, histogram_rx.receive().await) {
-            let prefix_sum_readback_data = prefix_sum_readback_slice.get_mapped_range();
-            let gpu_prefix_summed_histogram: Vec<u32> =
-                bytemuck::cast_slice(&prefix_sum_readback_data).to_vec();
-            drop(prefix_sum_readback_data);
-            prefix_sum_readback_b.unmap();
-            let histogram_data = histogram_readback_slice.get_mapped_range();
-            let gpu_histogram_vals: Vec<u32> = bytemuck::cast_slice(&histogram_data).to_vec();
-            drop(histogram_data);
-            histogram_readback_b.unmap();
-
-            let cpu_prefix_gpu_histogram_vals: Vec<u64> = gpu_histogram_vals
-                .iter()
-                .map(|x| *x as u64)
-                .scan(0, |sum, i| {
-                    *sum += i;
-                    Some(*sum - i)
-                })
-                .collect::<Vec<u64>>();
-            assert_eq!(
-                cpu_prefix_gpu_histogram_vals.len(),
-                gpu_prefix_summed_histogram.len()
-            );
-            for (i, gpu_prefix_sum_histogram_val) in gpu_prefix_summed_histogram.iter().enumerate()
-            {
-                print!(
-                    "gpu: {:5}, cpu: {:5}\n",
-                    gpu_prefix_sum_histogram_val, cpu_prefix_gpu_histogram_vals[i]
-                );
-                if *gpu_prefix_sum_histogram_val != (cpu_prefix_gpu_histogram_vals[i] as u32) {
-                    //println!("not correct!!!!");
-                }
-                if (i as u32) % number_of_workgroups == 7 {
-                    //println!("");
-                }
-                if (i as u32) % 256 == 255 {
-                    //println!("-------");
-                }
-            }
-        } else {
-            panic!("failed to run compute on GPU!!!!!");
-        }
-    }
-    //need both buffers for morton codes, as well as histogram
-    #[cfg(radix_sort_readback)]
-    {
-        let radix_sort_morton_codes_2_readback_slice =
-            radix_sort_morton_codes_2_readback_b.slice(..);
-        // NOTE: We have to create the mapping THEN device.poll() before await
-        // the future. Otherwise the application will freeze.
-        let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
-        radix_sort_morton_codes_2_readback_slice.map_async(MapMode::Read, move |result| {
-            tx.send(result).unwrap();
-        });
-
-        let radix_sort_morton_codes_readback_slice = radix_sort_morton_codes_readback_b.slice(..);
-        // NOTE: We have to create the mapping THEN device.poll() before await
-        // the future. Otherwise the application will freeze.
-        let (tx2, rx2) = futures_intrusive::channel::shared::oneshot_channel();
-        radix_sort_morton_codes_readback_slice.map_async(MapMode::Read, move |result| {
-            tx2.send(result).unwrap();
-        });
-
-        device.poll(Maintain::Wait);
-        if let (Some(Ok(())), Some(Ok(()))) = (rx.receive().await, rx2.receive().await) {
-            let radix_sort_morton_codes_2_readback_data =
-                radix_sort_morton_codes_2_readback_slice.get_mapped_range();
-            let radix_sort_morton_codes_2: Vec<u64> =
-                bytemuck::cast_slice(&radix_sort_morton_codes_2_readback_data).to_vec();
-            drop(radix_sort_morton_codes_2_readback_data);
-            radix_sort_morton_codes_2_readback_b.unmap();
-
-            let radix_sort_morton_codes_readback_data =
-                radix_sort_morton_codes_readback_slice.get_mapped_range();
-            let radix_sort_morton_codes: Vec<u64> =
-                bytemuck::cast_slice(&radix_sort_morton_codes_readback_data).to_vec();
-            drop(radix_sort_morton_codes_readback_data);
-            radix_sort_morton_codes_readback_b.unmap();
-
-            let mut full_manual_histogram: Vec<u32> =
-                vec![0; (number_of_workgroups * HISTOGRAM_SIZE) as usize];
-
-            for (chunk_id, morton_codes_workgroup) in
-                radix_sort_morton_codes.chunks(256).enumerate()
-            {
-                let mut manual_histogram: Vec<u32> = vec![0; 64];
-                for (i, mc) in morton_codes_workgroup.iter().enumerate() {
-                    let digit = mc & 63;
-                    //println!("digit: {:#08b}, chunk_id: {}, wid: {}", digit, chunk_id, i);
-                    manual_histogram[digit as usize] += 1;
-                }
-                for (i, h) in manual_histogram.iter().enumerate() {
-                    full_manual_histogram[i * (number_of_workgroups as usize) + chunk_id] = *h;
-                }
-            }
-
-            let prefix_summed_histogram_vals = full_manual_histogram
-                .iter()
-                .scan(0, |sum, i| {
-                    *sum += i;
-                    Some(*sum - i)
-                })
-                .collect::<Vec<u32>>();
-
-            // log::info!("results length: {}", radix_sort_morton_codes.len());
-            // for x in radix_sort_morton_codes.chunks(256) {
-            //     for (i, c) in x.iter().enumerate() {}
-            // }
-
-            let gpu_codes: Vec<&[u64]> = radix_sort_morton_codes_2.chunks(256).collect();
-
-            let mut sorted_codes = radix_sort_morton_codes.clone();
-            sorted_codes.sort_by_key(|x| x & 63);
-
-            let mut cpu_sort: Vec<u64> = vec![0; NUM_TRIANGLES as usize];
-
-            // for (chunk_id, chunk) in radix_sort_morton_codes.chunks(256).enumerate() {
-            //println!("-------------------------------------------------------");
-            //println!("chunk_id: {}", chunk_id);
-            //     let digits: Vec<u32> = chunk.iter().map(|x| (x & (63 as u64)) as u32).collect();
-            //     let mut indexed_digits: Vec<(usize, &u32)> = digits.iter().enumerate().collect();
-            //     indexed_digits.sort_by_key(|&(_, num)| num);
-            //     let mut map: Vec<usize> = vec![0; digits.len()];
-            //     for (new_idx, &(original_idx, _)) in indexed_digits.iter().enumerate() {
-            //         map[original_idx] = new_idx;
-            //     }
-            //     let sorted_data: Vec<u32> = indexed_digits.iter().map(|&(_, num)| *num).collect();
-            //     let original_indices: Vec<usize> =
-            //         indexed_digits.iter().map(|&(idx, _)| idx).collect();
-            //     let mut local_histogram: Vec<u32> = vec![0; 64];
-            //     digits
-            //         .iter()
-            //         .for_each(|x| local_histogram[*x as usize] += 1);
-            //     let local_prefix_sum: Vec<u32> = local_histogram
-            //         .iter()
-            //         .scan(0u32, |state, elem| {
-            //             *state += *elem;
-            //             Some(*state - *elem)
-            //         })
-            //         .collect();
-
-            //     let mut secondary_local_prefix_sum = vec![0u32; 64];
-
-            //     for thread_lane in 0..64 {
-            //         secondary_local_prefix_sum[thread_lane] = local_histogram[thread_lane];
-            //     }
-            //     let mut i = 1u32;
-            //     while i < 64 {
-            //         for wid in 0..64 {
-            //             if wid % (2 * i) == 0 {
-            //                 let first = (wid + (2 * i) - 1) as usize;
-            //                 let second = (wid + i - 1) as usize;
-            //                 secondary_local_prefix_sum[first] += secondary_local_prefix_sum[second];
-            //             }
-            //         }
-            //         //println!("");
-            //         i <<= 1;
-            //     }
-
-            //println!("{:?}", secondary_local_prefix_sum);
-
-            //     for wid in 0..64 {
-            //         if wid % 64 == 0 {
-            //             let before = secondary_local_prefix_sum[32 - 1];
-            //             secondary_local_prefix_sum[(32 - 1) as usize] = 0;
-            //             secondary_local_prefix_sum[(64 - 1) as usize] = before;
-            //         }
-            //     }
-
-            //     let mut i = 32;
-            //     while i > 1 {
-            //         for wid in 0..64 {
-            //             if wid % i == 0 {
-            //                 let lo = (i / 2) - 1;
-            //                 let hi = i - 1;
-
-            //                 let before = secondary_local_prefix_sum[wid + lo];
-            //                 let after = secondary_local_prefix_sum[wid + hi];
-            //                 secondary_local_prefix_sum[wid + lo] = after;
-            //                 secondary_local_prefix_sum[wid + hi] += before;
-            //             }
-            //         }
-            //         i >>= 1;
-            //     }
-
-            // for (i, v) in secondary_local_prefix_sum.iter().enumerate() {
-            //     //println!("{}, {}, {}", *v, local_histogram[i], local_prefix_sum[i]);
-            // }
-
-            // for (i, val) in secondary_local_prefix_sum.iter().enumerate() {
-            //     let manual = *val;
-            //     let correct = local_prefix_sum[i];
-
-            //     //println!("manual: {}, correct: {}", manual, correct);
-            //     if manual != correct {
-            //         //println!("incorrect!");
-            //     }
-            // }
-
-            //     for (wid, code) in chunk.iter().enumerate() {
-            //         if wid % 64 == 0 {
-            //             //println!("-------------------");
-            //         }
-            //         if wid % 128 == 0 {
-            //             //println!("_-_-_-_-_-_-");
-            //         }
-            //         if wid % 192 == 0 {
-            //             //println!("______________");
-            //         }
-            //         let digit = digits[wid];
-            //         let id = chunk_id * 256 + wid;
-            //         let histogram_column = id / 256;
-            //         let histogram_row = digit;
-            //         let histogram_index: u32 = (8 * histogram_row) + histogram_column as u32;
-            //         let local_id_cpu = map[wid] as u32;
-            //         let storage_histogram_cpu =
-            //             prefix_summed_histogram_vals[histogram_index as usize];
-
-            //         let histogram_na_cpu = local_prefix_sum[digit as usize] as u32;
-
-            //         let final_location: u64 = ((local_id_cpu + storage_histogram_cpu)
-            //             .wrapping_sub(histogram_na_cpu))
-            //             as u64;
-            //         let final_location_gpu = gpu_codes[chunk_id][wid];
-
-            //         let code_gpu = gpu_codes[chunk_id][wid];
-            //         let local_id_gpu = (code_gpu >> 16) & 65535;
-            //         let storage_histogram_gpu = code_gpu & 65535;
-            //         let histogram_prefix_gpu = (code_gpu >> 48) & 65535;
-            //         let digit_gpu = (code_gpu >> 32) & 65535;
-
-            //         cpu_sort[final_location as usize] = *code;
-            //         //println!(
-            //         //     "local_id: {}, storage_histogram: {}, local_prefix_sum: {}, digit_cpu: {}, histogram: {}",
-            //         //     local_id_cpu, storage_histogram_cpu, histogram_na_cpu, digit, local_histogram[digit as usize]
-            //         // );
-            //         //println!(
-            //         //     "local_id_gpu: {}, storage_histogram_gpu: {}, local_prefix_sum_gpu: {}, digit_gpu: {}\n",
-            //         //     local_id_gpu, storage_histogram_gpu, histogram_prefix_gpu, digit_gpu
-            //         // );
-            //         //println!(
-            //         //     "local_prefix_sum: {}, digit_cpu: {}, histogram: {}",
-            //         //     histogram_na_cpu, digit, local_histogram[digit as usize]
-            //         // );
-            //         //println!(
-            //         //     "local_prefix_sum_gpu: {}, digit_gpu: {}\n",
-            //         //     histogram_prefix_gpu, digit_gpu
-            //         // );
-
-            //         //println!("gpu: {}, cpu: {}", storage_histogram_gpu, histogram_na_cpu);
-
-            //         //println!("cpu: {}, gpu: {}", final_location, final_location_gpu);
-            //     }
-            // }
-            let mut sorted = true;
-            let mut all_zero = true;
-            let mut times_unsorted = 0;
-            // for i in cpu_sort.windows(2) {
-            //     let before = i[0] & 63;
-            //     let after = i[1] & 63;
-            //println!("{}", before);
-            //     if before > after {
-            //         times_unsorted += 1;
-            //         sorted = false;
-            //     }
-            //     if before != 0u64 {
-            //         all_zero = false;
-            //     }
-            //     if after != 0u64 {
-            //         all_zero = false;
-            //     }
-            // }
-            // if !sorted {
-            //     log::error!("Not sorted!!! {}", times_unsorted);
-            // } else {
-            //println!("sorted!");
-            // }
-            // if all_zero {
-            //     log::error!("all zero!!!");
-            // }
-
-            let mut sorted = true;
-            let mut all_zero = true;
-            for (x, i) in radix_sort_morton_codes_2.windows(2).enumerate() {
-                let before = i[0];
-                let after = i[1];
-                //println!("{:6}, {:#018x}", x, before);
-                if before > after {
-                    //println!("not sorted!");
-                    //println!("bef: {:018x}", before);
-                    //println!("aft: {:018x}", after);
-                    //println!("xor: {:018x}", before ^ after);
-                    //println!("leading_zeros: {}", (before ^ after).leading_zeros());
-                    sorted = false;
-                }
-                if before != 0u64 {
-                    all_zero = false;
-                }
-                if after != 0u64 {
-                    all_zero = false;
-                }
-            }
-            if !sorted {
-                log::error!("Not sorted!!!");
-            } else {
-                //println!("Sorted !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-            }
-            if all_zero {
-                log::error!("all zero!!!");
-            }
-
-            // let mut set: HashSet<u64> = HashSet::new();
-            // for v in radix_sort_morton_codes {
-            //println!("{}", v);
-            //     let x = set.insert(v);
-            //     if !x {
-            //         log::error!("value already found! {}", v);
-            //     }
-            // }
-
-            // for (i, c) in radix_sort_morton_codes_2.chunks(256).enumerate() {
-            //     let mut set: HashSet<u32> = HashSet::new();
-            //     let mut bar = false;
-            //     for (j, code) in c.iter().enumerate() {
-            //         if i > 0 {
-            //             let local_id = (code >> 16) & 65535;
-            //             let storage_histogram = code & 65535;
-            //             let histogram_prefix = (code >> 48) & 65535;
-            //             let digit = (code >> 32) & 65535;
-            //             //println!(
-            //                 "local_id: {}, histogram_na: {}, histogram_prefix: {}, digit: {}",
-            //                 local_id, storage_histogram, histogram_prefix, digit
-            //             );
-            //             if local_id < histogram_prefix {
-            //                 //println!("smaller");
-            //             }
-            //             if (local_id + storage_histogram)
-            //                 .overflowing_sub(histogram_prefix)
-            //                 .0
-            //                 > 2000
-            //             {
-            //                 //println!(
-            //                     "bad id {}",
-            //                     (local_id + storage_histogram)
-            //                         .overflowing_sub(histogram_prefix)
-            //                         .0
-            //                 );
-            //             }
-
-            //             let inserted = set.insert(local_id as u32);
-            //             if !inserted {
-            //                 //println!("");
-            //             }
-            //         }
-            //         if i == 0 {
-            //             let histogram = code & 65535;
-            //             //println!("histogram {}", histogram);
-            //             //println!("--------------------");
-            //             bar = true;
-            //         }
-            //     }
-            // }
-
-            // for v in radix_sort_morton_codes {
-            //     let local_id = (v >> 16) & 65535;
-            //     let storage_histogram = v & 65535;
-            //     let histogram_prefix = (v >> 32) & (u32::MAX as u64);
-            //println!(
-            //         "local_id: {}, histogram_na: {}, histogram_prefix: {}",
-            //         local_id, storage_histogram, histogram_prefix
-            //     );
-            //     if local_id < histogram_prefix {
-            //         //println!("smaller");
-            //     }
-            //     if local_id + storage_histogram - histogram_prefix > 2000 {
-            //         //println!("bad id {}", local_id + storage_histogram - histogram_prefix);
-            //     }
-            // }
-
-            // for v in radix_sort_morton_codes.chunks(256) {
-            //     let mut set: HashSet<u64> = HashSet::new();
-            //     for code in v {
-            //         if set.contains(code) {
-            //             log::error!("value already found");
-            //         }
-            //         set.insert(*code);
-            //     }
-            // }
-        } else {
-            panic!("failed to run compute on GPU!!!!!");
-        }
-    }
 }
 
 fn create_radix_uniforms_buffer(device: &Device, pass_number: u32) -> Buffer {
@@ -1544,26 +926,23 @@ fn create_radix_uniforms_buffer(device: &Device, pass_number: u32) -> Buffer {
     radix_uniforms_b
 }
 
-fn select_digit(pass_number: u32, code_1: u32, code_2: u32) -> u32 {
-    let mut val = 64;
-
-    if pass_number < 5 {
-        val = (code_1 >> (pass_number * 6)) & 63;
-    } else if pass_number > 5 {
-        val = (code_2 >> ((pass_number - 6) * 6 + 4)) & 63;
-    } else {
-        val = ((code_1 >> 30) & 3) | ((code_2 & 15) << 2);
-    }
-    return val;
-}
-
 fn main() {
     pollster::block_on(run());
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{calculate_number_of_workgroups_u32, select_digit};
+    use crate::calculate_number_of_workgroups_u32;
+
+    fn select_digit(pass_number: u32, code_1: u32, code_2: u32) -> u32 {
+        let val = match pass_number {
+            0..=4 => (code_1 >> (pass_number * 6)) & 63,
+            5 => ((code_1 >> 30) & 3) | ((code_2 & 15) << 2),
+            6..=10 => (code_2 >> ((pass_number - 6) * 6 + 4)) & 63,
+            _ => panic!(),
+        };
+        return val;
+    }
 
     #[test]
     fn workgroup_calculation() {
@@ -1582,13 +961,14 @@ mod tests {
 
         for i in 0..11 {
             let y: u64 = digit.wrapping_shl(i * 6);
-            //println!("{:064b}", y);
-
             let hi: u32 = (y >> 32) as u32;
             let lo: u32 = (y & (u32::MAX as u64)) as u32;
-            //println!("{:032b} {:032b}", hi, lo);
             let selected = select_digit(i as u32, lo, hi);
-            //println!("selected {}, digit {}", selected, digit);
+            if i < 10 {
+                assert_eq!(63, selected);
+            } else {
+                assert_eq!(15, selected);
+            }
         }
     }
 }
