@@ -18,9 +18,9 @@ struct Vertex {
 struct TriangleIndices {
     tri_indices: vec3<u32>,
     // TODO: Think about this (we can fit one u32 for free, but not 3)
-    node_index: u32,
-    material_id: u32,
-    flags: u32,
+    // node_index: u32,
+    // material_id: u32,
+    // flags: u32,
 };
 
 struct MortonCodeUniforms {

@@ -1,6 +1,8 @@
 use std::{
     borrow::Cow,
     cmp::PartialEq,
+    fs::File,
+    io::Write,
     ops::{Add, Rem, Sub},
 };
 
@@ -18,8 +20,8 @@ use wgpu::{
     ShaderModuleDescriptor, ShaderSource, ShaderStages, *,
 };
 
-const NUM_VERTICES: u32 = 500000u32;
-const NUM_TRIANGLES: u32 = 1500000u32;
+const NUM_VERTICES: u32 = 1000000u32;
+const NUM_TRIANGLES: u32 = 3000000u32;
 const BITS_PER_PASS: u32 = 6;
 const HISTOGRAM_SIZE: u32 = 1 << BITS_PER_PASS;
 const WORKGROUP_SIZE: u32 = 256u32;
@@ -27,6 +29,7 @@ const ITEMS_PROCESSED_PER_LANE_HISTOGRAM_PASS: u32 = 1u32;
 const ITEMS_PER_HISTOGRAM_PASS: u32 = WORKGROUP_SIZE * ITEMS_PROCESSED_PER_LANE_HISTOGRAM_PASS;
 const ITEMS_PER_LARGE_PREFIX: u32 = 256u32;
 const MAX_ITEMS_IN_SMALL_PREFIX: u32 = 1024u32;
+const NUMBER_SECTIONS_SCATTER: u32 = 4u32;
 
 const RNG_SEED: u64 = 7;
 
@@ -52,9 +55,9 @@ pub struct Vertices {
 #[derive(ShaderType, Clone, Copy)]
 pub struct TriangleIndices {
     indices: UVec3,
-    node_index: u32,
-    material_id: u32,
-    flags: u32,
+    // node_index: u32,
+    // material_id: u32,
+    // flags: u32,
 }
 
 /// A list of triangles.
@@ -79,6 +82,87 @@ pub struct MortonUniforms {
 #[derive(ShaderType)]
 pub struct RadixUniforms {
     pass_number: u32,
+}
+
+#[derive(ShaderType)]
+pub struct ScatterUniforms {
+    scatter_step: u32,
+    number_sections: u32,
+}
+
+pub struct Buffers {
+    vertices: Buffer,
+    indices: Buffer,
+    indices_2: Buffer,
+    morton_uniforms: Buffer,
+    histogram: Buffer,
+    morton_codes: Buffer,
+    morton_codes_2: Buffer,
+    prefix_sums: Vec<Buffer>,
+    final_locations: Buffer,
+}
+
+fn create_all_buffers(
+    device: &Device,
+    vertices: Vertices,
+    triangles: Triangles,
+    morton_code_generator: &MortonCodeGenerator,
+    histogram_buffer_number_elements: u32,
+) -> Buffers {
+    let morton_uniforms = create_morton_uniforms(&morton_code_generator);
+    let morton_uniforms_b = create_buffer(
+        morton_uniforms,
+        &device,
+        "morton uniform buffer",
+        BufferUsages::STORAGE,
+    );
+    let histogram_b = device.create_buffer(&BufferDescriptor {
+        label: Some("original histogram buffer"),
+        size: (histogram_buffer_number_elements * 4) as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let prefix_sum_bs = create_prefix_buffers(&device);
+    let vertices_b = create_buffer(vertices, &device, "vertices buffer", BufferUsages::STORAGE);
+    let indices_b = create_buffer(triangles, &device, "indices buffer", BufferUsages::STORAGE);
+    let indices_2_b = device.create_buffer(&BufferDescriptor {
+        label: Some("second indices buffer"),
+        size: indices_b.size(),
+        usage: BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let morton_code_size: u64 = (std::mem::size_of::<u64>()).try_into().unwrap();
+    let morton_code_b_size = morton_code_size * NUM_TRIANGLES as u64;
+    let morton_code_b = device.create_buffer(&BufferDescriptor {
+        label: Some("morton code buffer"),
+        size: morton_code_b_size,
+        usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+
+    let morton_code_2_b = device.create_buffer(&BufferDescriptor {
+        label: Some("morton code buffer 2"),
+        size: morton_code_b_size,
+        usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let final_locations = device.create_buffer(&BufferDescriptor {
+        label: Some("final locations"),
+        size: (NUM_TRIANGLES * 4) as u64,
+        usage: BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    Buffers {
+        vertices: vertices_b,
+        indices: indices_b,
+        indices_2: indices_2_b,
+        morton_uniforms: morton_uniforms_b,
+        histogram: histogram_b,
+        morton_codes: morton_code_b,
+        morton_codes_2: morton_code_2_b,
+        prefix_sums: prefix_sum_bs,
+        final_locations: final_locations,
+    }
 }
 
 /// Creates a GPU buffer from type T.
@@ -194,9 +278,9 @@ fn create_scene() -> (
         scene_max = scene_max.max(vertices.vertices[indices.z as usize].position);
         triangles.triangles.push(TriangleIndices {
             indices,
-            node_index: 0,
-            material_id: rng_gen.gen_range(0..5),
-            flags: 0,
+            // node_index: 0,
+            // material_id: rng_gen.gen_range(0..5),
+            // flags: 0,
         })
     }
 
@@ -281,6 +365,7 @@ fn create_prefix_buffers(device: &Device) -> Vec<Buffer> {
     let bytes_per_element = 4u64;
     // Create all the buffers
     for number_of_items_in_buffer in &buffers_num_items {
+        //println!("size of buffer {}", number_of_items_in_buffer);
         prefix_sum_buffers.push(device.create_buffer(&BufferDescriptor {
             label: Some(format!("prefix sum buffer {number_of_items_in_buffer}").as_str()),
             size: number_of_items_in_buffer * bytes_per_element,
@@ -378,26 +463,6 @@ fn create_radix_bgl_histogram(device: &Device) -> BindGroupLayout {
                 binding: 3,
                 visibility: ShaderStages::COMPUTE,
                 ty: BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            BindGroupLayoutEntry {
-                binding: 4,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            BindGroupLayoutEntry {
-                binding: 5,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::Buffer {
                     ty: BufferBindingType::Storage { read_only: false },
                     has_dynamic_offset: false,
                     min_binding_size: None,
@@ -452,6 +517,54 @@ fn create_radix_bgl_prefix_small(device: &Device) -> BindGroupLayout {
     })
 }
 
+fn create_radix_bgl_index(device: &Device) -> BindGroupLayout {
+    device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("Radix bind group layout index"),
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
 fn create_radix_bgl_scatter(device: &Device) -> BindGroupLayout {
     device.create_bind_group_layout(&BindGroupLayoutDescriptor {
         label: Some("Radix bind group layout scatter"),
@@ -470,7 +583,7 @@ fn create_radix_bgl_scatter(device: &Device) -> BindGroupLayout {
                 binding: 1,
                 visibility: ShaderStages::COMPUTE,
                 ty: BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
+                    ty: BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
@@ -480,7 +593,7 @@ fn create_radix_bgl_scatter(device: &Device) -> BindGroupLayout {
                 binding: 2,
                 visibility: ShaderStages::COMPUTE,
                 ty: BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
+                    ty: BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
@@ -522,6 +635,31 @@ fn create_radix_bgl_scatter(device: &Device) -> BindGroupLayout {
 
 // endregion
 
+fn create_all_bind_group_layouts(
+    device: &Device,
+) -> (
+    BindGroupLayout,
+    BindGroupLayout,
+    BindGroupLayout,
+    BindGroupLayout,
+    BindGroupLayout,
+    BindGroupLayout,
+) {
+    let morton_code_l = create_morton_code_bind_group_layout(device);
+    let radix_histogram_l = create_radix_bgl_histogram(device);
+    let radix_prefix_large_l = create_radix_bgl_prefix_large(device);
+    let radix_prefix_small_l = create_radix_bgl_prefix_small(device);
+    let radix_index_l = create_radix_bgl_index(device);
+    let radix_scatter_l = create_radix_bgl_scatter(device);
+    (
+        morton_code_l,
+        radix_histogram_l,
+        radix_prefix_large_l,
+        radix_prefix_small_l,
+        radix_index_l,
+        radix_scatter_l,
+    )
+}
 /// Creates a bind group given a certain layout, a list of buffers, and a name.
 fn create_bind_group(
     device: &Device,
@@ -539,9 +677,185 @@ fn create_bind_group(
         .collect();
     device.create_bind_group(&BindGroupDescriptor {
         label: Some(label),
-        layout: layout,
+        layout,
         entries: &entries,
     })
+}
+
+fn create_all_pipelines(
+    device: &Device,
+    morton_code_l: &BindGroupLayout,
+    morton_module: ShaderModule,
+    radix_histogram_l: &BindGroupLayout,
+    radix_sort_histogram_module: ShaderModule,
+    radix_prefix_large_l: &BindGroupLayout,
+    radix_sort_prefix_large_module: ShaderModule,
+    radix_prefix_small_l: &BindGroupLayout,
+    radix_sort_prefix_small_module: ShaderModule,
+    radix_index_l: &BindGroupLayout,
+    radix_sort_index_module: ShaderModule,
+    radix_scatter_l: &BindGroupLayout,
+    radix_sort_scatter_module: ShaderModule,
+) -> (
+    ComputePipeline,
+    ComputePipeline,
+    ComputePipeline,
+    ComputePipeline,
+    ComputePipeline,
+    ComputePipeline,
+    ComputePipeline,
+) {
+    (
+        device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("morton code compute pipeline"),
+            layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some("Compute Pipeline Layout"),
+                bind_group_layouts: &[morton_code_l],
+                push_constant_ranges: &[],
+            })),
+            module: &morton_module,
+            entry_point: "morton_code",
+        }),
+        device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("radix sort histogram compute pipeline"),
+            layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some("Compute Pipeline Layout"),
+                bind_group_layouts: &[radix_histogram_l],
+                push_constant_ranges: &[],
+            })),
+            module: &radix_sort_histogram_module,
+            entry_point: "radix_sort_compute_histogram",
+        }),
+        device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("radix prefix large pipeline"),
+            layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some("Compute Pipeline Layout"),
+                bind_group_layouts: &[radix_prefix_large_l],
+                push_constant_ranges: &[],
+            })),
+            module: &radix_sort_prefix_large_module,
+            entry_point: "radix_sort_block_sum_large",
+        }),
+        device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("radix prefix large pipeline 2"),
+            layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some("Compute Pipeline Layout"),
+                bind_group_layouts: &[radix_prefix_large_l],
+                push_constant_ranges: &[],
+            })),
+            module: &radix_sort_prefix_large_module,
+            entry_point: "radix_sort_block_sum_large_after",
+        }),
+        device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("radix sort prefix sum small compute pipeline"),
+            layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some("Compute Pipeline Layout"),
+                bind_group_layouts: &[radix_prefix_small_l],
+                push_constant_ranges: &[],
+            })),
+            module: &radix_sort_prefix_small_module,
+            entry_point: "radix_sort_block_sum_small",
+        }),
+        device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("radix index pipeline"),
+            layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some("Compute Pipeline Layout"),
+                bind_group_layouts: &[radix_index_l],
+                push_constant_ranges: &[],
+            })),
+            module: &radix_sort_index_module,
+            entry_point: "radix_sort_index",
+        }),
+        device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("morton code compute pipeline"),
+            layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some("Compute Pipeline Layout"),
+                bind_group_layouts: &[radix_scatter_l],
+                push_constant_ranges: &[],
+            })),
+            module: &radix_sort_scatter_module,
+            entry_point: "radix_sort_scatter",
+        }),
+    )
+}
+
+struct ShaderModules {
+    morton_code: ShaderModule,
+    radix_sort_histogram: ShaderModule,
+    radix_sort_prefix_large: ShaderModule,
+    radix_sort_prefix_small: ShaderModule,
+    radix_sort_index: ShaderModule,
+    radix_sort_scatter: ShaderModule,
+}
+
+fn create_all_shader_modules(device: &Device) -> ShaderModules {
+    ShaderModules {
+        morton_code: device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("morton_module"),
+            source: ShaderSource::Wgsl(Cow::Borrowed(include_str!("morton_code.wgsl"))),
+        }),
+        radix_sort_histogram: device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("radix_sort_histogram_module"),
+            source: ShaderSource::Wgsl(Cow::Borrowed(include_str!("radix_sort.wgsl"))),
+        }),
+        radix_sort_prefix_large: device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("radix_sort_prefix_large_module"),
+            source: ShaderSource::Wgsl(Cow::Borrowed(include_str!(
+                "radix_sort_block_sum_large.wgsl"
+            ))),
+        }),
+        radix_sort_prefix_small: device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("radix_sort_prefix_small_module"),
+            source: ShaderSource::Wgsl(Cow::Borrowed(include_str!(
+                "radix_sort_block_sum_small.wgsl"
+            ))),
+        }),
+        radix_sort_index: device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("radix_sort_index_module"),
+            source: ShaderSource::Wgsl(Cow::Borrowed(include_str!("radix_sort_index.wgsl"))),
+        }),
+        radix_sort_scatter: device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("radix_sort_scatter"),
+            source: ShaderSource::Wgsl(Cow::Borrowed(include_str!(
+                "radix_sort_better_scatter.wgsl"
+            ))),
+        }),
+    }
+}
+
+fn create_index_uniforms(device: &Device, pass_number: u32) -> Buffer {
+    let radix_uniforms = RadixUniforms { pass_number };
+
+    let radix_uniforms_temp_buf: Vec<u8> = Vec::new();
+    let mut radix_uniforms_temp_buf_ub: UniformBuffer<Vec<u8>> =
+        UniformBuffer::new(radix_uniforms_temp_buf);
+    radix_uniforms_temp_buf_ub.write(&radix_uniforms).unwrap();
+    let radix_uniforms_b = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("radix uniforms buffer"),
+        contents: radix_uniforms_temp_buf_ub.as_ref(),
+        usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+    });
+    radix_uniforms_b
+}
+
+fn create_radix_scatter_uniforms(device: &Device, scatter_step: u32) -> Buffer {
+    let radix_scatter_uniforms = ScatterUniforms {
+        scatter_step,
+        number_sections: NUMBER_SECTIONS_SCATTER,
+    };
+
+    let radix_scatter_uniforms_temp_buf: Vec<u8> = Vec::new();
+    let mut radix_scatter_uniforms_temp_buf_ub: UniformBuffer<Vec<u8>> =
+        UniformBuffer::new(radix_scatter_uniforms_temp_buf);
+    radix_scatter_uniforms_temp_buf_ub
+        .write(&radix_scatter_uniforms)
+        .unwrap();
+    let radix_scatter_uniforms_b = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("radix scatter uniforms buffer"),
+        contents: radix_scatter_uniforms_temp_buf_ub.as_ref(),
+        usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+    });
+    radix_scatter_uniforms_b
 }
 
 async fn run() {
@@ -574,155 +888,91 @@ async fn run() {
     device.start_capture();
     let number_of_workgroups =
         calculate_number_of_workgroups_u32(NUM_TRIANGLES, ITEMS_PER_HISTOGRAM_PASS);
-    // region: create triangles and morton code generator
     let (vertices, triangles, morton_code_generator, _vertices_copy, _triangles_copy) =
         create_scene();
-    assert_eq!(triangles.triangles.len(), NUM_TRIANGLES as usize);
-    // endregion
-    // region: creating buffers
-    let morton_uniforms = create_morton_uniforms(&morton_code_generator);
-    let morton_uniforms_b = create_buffer(
-        morton_uniforms,
-        &device,
-        "morton uniform buffer",
-        BufferUsages::STORAGE,
-    );
     let histogram_buffer_number_elements = round_up_u32(number_of_workgroups * HISTOGRAM_SIZE, 256);
-    let histogram_b = device.create_buffer(&BufferDescriptor {
-        label: Some("original histogram buffer"),
-        size: (histogram_buffer_number_elements * 4) as u64,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    let buffers = create_all_buffers(
+        &device,
+        vertices,
+        triangles,
+        &morton_code_generator,
+        histogram_buffer_number_elements,
+    );
+
+    #[cfg(radix_sort_readback)]
+    let radix_sort_morton_codes_readback_b = device.create_buffer(&BufferDescriptor {
+        label: Some("radix_sort_morton_codes_readback_b"),
+        size: buffers.morton_codes.size(),
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-    let prefix_sum_bs = create_prefix_buffers(&device);
-    let vertices_b = create_buffer(vertices, &device, "vertices buffer", BufferUsages::STORAGE);
-    let indices_b = create_buffer(triangles, &device, "indices buffer", BufferUsages::STORAGE);
-    let indices_2_b = device.create_buffer(&BufferDescriptor {
-        label: Some("second indices buffer"),
-        size: indices_b.size(),
-        usage: BufferUsages::STORAGE,
+    #[cfg(radix_sort_readback)]
+    let radix_sort_morton_codes_2_readback_b = device.create_buffer(&BufferDescriptor {
+        label: Some("radix_sort_morton_codes_2_readback_b"),
+        size: buffers.morton_codes.size(),
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-    let morton_code_size: u64 = (std::mem::size_of::<u64>()).try_into().unwrap();
-    let morton_code_b_size = morton_code_size * NUM_TRIANGLES as u64;
-    let morton_code_b = device.create_buffer(&BufferDescriptor {
-        label: Some("morton code buffer"),
-        size: morton_code_b_size,
-        usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::STORAGE,
+    #[cfg(morton_code_readback)]
+    let morton_code_readback_b = device.create_buffer(&BufferDescriptor {
+        label: Some("morton code readback buffer"),
+        size: (NUM_TRIANGLES * 8) as u64,
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
 
-    let morton_code_2_b = device.create_buffer(&BufferDescriptor {
-        label: Some("morton code buffer 2"),
-        size: morton_code_b_size,
-        usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::STORAGE,
-        mapped_at_creation: false,
-    });
-    // endregion
     // region: shader modules
-    let morton_module = device.create_shader_module(ShaderModuleDescriptor {
-        label: Some("morton_module"),
-        source: ShaderSource::Wgsl(Cow::Borrowed(include_str!("morton_code.wgsl"))),
-    });
-
-    let radix_sort_histogram_module = device.create_shader_module(ShaderModuleDescriptor {
-        label: Some("radix_sort_histogram_module"),
-        source: ShaderSource::Wgsl(Cow::Borrowed(include_str!("radix_sort.wgsl"))),
-    });
-
-    let radix_sort_prefix_large_module = device.create_shader_module(ShaderModuleDescriptor {
-        label: Some("radix_sort_prefix_large_module"),
-        source: ShaderSource::Wgsl(Cow::Borrowed(include_str!(
-            "radix_sort_block_sum_large.wgsl"
-        ))),
-    });
-
-    let radix_sort_prefix_small_module = device.create_shader_module(ShaderModuleDescriptor {
-        label: Some("radix_sort_prefix_small_module"),
-        source: ShaderSource::Wgsl(Cow::Borrowed(include_str!(
-            "radix_sort_block_sum_small.wgsl"
-        ))),
-    });
-
-    let radix_sort_scatter_module = device.create_shader_module(ShaderModuleDescriptor {
-        label: Some("radix_sort_scatter_module"),
-        source: ShaderSource::Wgsl(Cow::Borrowed(include_str!("radix_sort_scatter.wgsl"))),
-    });
-
+    let shader_modules = create_all_shader_modules(&device);
+    let (
+        morton_module,
+        radix_sort_histogram_module,
+        radix_sort_prefix_large_module,
+        radix_sort_prefix_small_module,
+        radix_sort_index_module,
+        radix_sort_scatter_module,
+    ) = (
+        shader_modules.morton_code,
+        shader_modules.radix_sort_histogram,
+        shader_modules.radix_sort_prefix_large,
+        shader_modules.radix_sort_prefix_small,
+        shader_modules.radix_sort_index,
+        shader_modules.radix_sort_scatter,
+    );
     // endregion
     // region: bind group layouts
-    let morton_code_l = create_morton_code_bind_group_layout(&device);
-    let radix_histogram_l = create_radix_bgl_histogram(&device);
-    let radix_prefix_large_l = create_radix_bgl_prefix_large(&device);
-    let radix_prefix_small_l = create_radix_bgl_prefix_small(&device);
-    let radix_scatter_l = create_radix_bgl_scatter(&device);
+    let (
+        morton_code_l,
+        radix_histogram_l,
+        radix_prefix_large_l,
+        radix_prefix_small_l,
+        radix_index_l,
+        radix_scatter_l,
+    ) = create_all_bind_group_layouts(&device);
     // endregion
     // region: compute pipelines
-    let morton_code_p = device.create_compute_pipeline(&ComputePipelineDescriptor {
-        label: Some("morton code compute pipeline"),
-        layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("Compute Pipeline Layout"),
-            bind_group_layouts: &[&morton_code_l],
-            push_constant_ranges: &[],
-        })),
-        module: &morton_module,
-        entry_point: "morton_code",
-    });
-
-    let radix_histogram_p = device.create_compute_pipeline(&ComputePipelineDescriptor {
-        label: Some("radix sort histogram compute pipeline"),
-        layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("Compute Pipeline Layout"),
-            bind_group_layouts: &[&radix_histogram_l],
-            push_constant_ranges: &[],
-        })),
-        module: &radix_sort_histogram_module,
-        entry_point: "radix_sort_compute_histogram",
-    });
-
-    let radix_prefix_large_p = device.create_compute_pipeline(&ComputePipelineDescriptor {
-        label: Some("radix prefix large pipeline"),
-        layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("Compute Pipeline Layout"),
-            bind_group_layouts: &[&radix_prefix_large_l],
-            push_constant_ranges: &[],
-        })),
-        module: &radix_sort_prefix_large_module,
-        entry_point: "radix_sort_block_sum_large",
-    });
-
-    let radix_prefix_large_p_2 = device.create_compute_pipeline(&ComputePipelineDescriptor {
-        label: Some("radix prefix large pipeline 2"),
-        layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("Compute Pipeline Layout"),
-            bind_group_layouts: &[&radix_prefix_large_l],
-            push_constant_ranges: &[],
-        })),
-        module: &radix_sort_prefix_large_module,
-        entry_point: "radix_sort_block_sum_large_after",
-    });
-
-    let radix_prefix_small_p = device.create_compute_pipeline(&ComputePipelineDescriptor {
-        label: Some("radix sort prefix sum small compute pipeline"),
-        layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("Compute Pipeline Layout"),
-            bind_group_layouts: &[&radix_prefix_small_l],
-            push_constant_ranges: &[],
-        })),
-        module: &radix_sort_prefix_small_module,
-        entry_point: "radix_sort_block_sum_small",
-    });
-
-    let radix_scatter_p = device.create_compute_pipeline(&ComputePipelineDescriptor {
-        label: Some("morton code compute pipeline"),
-        layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("Compute Pipeline Layout"),
-            bind_group_layouts: &[&radix_scatter_l],
-            push_constant_ranges: &[],
-        })),
-        module: &radix_sort_scatter_module,
-        entry_point: "radix_sort_scatter",
-    });
+    let (
+        morton_code_p,
+        radix_histogram_p,
+        radix_prefix_large_p,
+        radix_prefix_large_p_2,
+        radix_prefix_small_p,
+        radix_index_p,
+        radix_scatter_p,
+    ) = create_all_pipelines(
+        &device,
+        &morton_code_l,
+        morton_module,
+        &radix_histogram_l,
+        radix_sort_histogram_module,
+        &radix_prefix_large_l,
+        radix_sort_prefix_large_module,
+        &radix_prefix_small_l,
+        radix_sort_prefix_small_module,
+        &radix_index_l,
+        radix_sort_index_module,
+        &radix_scatter_l,
+        radix_sort_scatter_module,
+    );
 
     // endregion
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
@@ -732,9 +982,56 @@ async fn run() {
     let morton_code_bg: BindGroup = create_bind_group(
         &device,
         &morton_code_l,
-        vec![&morton_uniforms_b, &vertices_b, &indices_b, &morton_code_b],
+        vec![
+            &buffers.morton_uniforms,
+            &buffers.vertices,
+            &buffers.indices,
+            &buffers.morton_codes,
+        ],
         "morton code bind group",
     );
+    let mut radix_prefix_large_bind_groups = vec![];
+
+    if !buffers.prefix_sums.is_empty() {
+        log::info!("prefix_sum_bs was not empty");
+        radix_prefix_large_bind_groups.push(create_bind_group(
+            &device,
+            &radix_prefix_large_l,
+            vec![&buffers.histogram, &buffers.prefix_sums[0]],
+            "radix sort prefix sum large bind group",
+        ));
+        for i in 0..buffers.prefix_sums.len() - 1 {
+            radix_prefix_large_bind_groups.push(create_bind_group(
+                &device,
+                &create_radix_bgl_prefix_large(&device),
+                vec![&buffers.prefix_sums[i], &buffers.prefix_sums[i + 1]],
+                "radix sort prefix sum large bind group",
+            ));
+        }
+    } else {
+        log::info!("We don't have any prefix sum buffers so we don't need any bindgroups to them, but we still need to create a small bind group on the histogram");
+    }
+
+    let radix_prefix_small_bg = match buffers.prefix_sums.is_empty() {
+        true => {
+            log::info!("Create a small bind group directly on the histogram buffer");
+            create_bind_group(
+                &device,
+                &radix_prefix_small_l,
+                vec![&buffers.histogram],
+                "radix sort prefix sum small bind group",
+            )
+        }
+        false => create_bind_group(
+            &device,
+            &radix_prefix_small_l,
+            vec![buffers.prefix_sums.last().unwrap()],
+            "radix sort prefix sum small bind group",
+        ),
+    };
+
+    let buffer_num_items = calculate_num_items_prefix_buffers(NUM_TRIANGLES as u64);
+    assert!(buffer_num_items.len() == radix_prefix_large_bind_groups.len());
 
     {
         let compute_pass_desc = ComputePassDescriptor {
@@ -748,103 +1045,115 @@ async fn run() {
         compute_pass.dispatch_workgroups(div_ceil_u32(NUM_TRIANGLES, 64), 1, 1);
     }
 
+    // TODO: Change back to 11
     for i in 0..11 {
-        let radix_uniforms_b = create_radix_uniforms_buffer(&device, i);
+        let radix_uniforms_b = create_index_uniforms(&device, i);
 
-        let radix_histogram_bg = create_bind_group(
-            &device,
-            &radix_histogram_l,
-            vec![
-                &radix_uniforms_b,
-                &indices_b,
-                &morton_code_b,
-                &indices_2_b,
-                &morton_code_2_b,
-                &histogram_b,
-            ],
-            "radix sort histogram bind group",
-        );
+        let ping_pong = i % 2 == 0;
 
-        let mut radix_prefix_large_bind_groups = vec![];
-
-        if !prefix_sum_bs.is_empty() {
-            log::info!("prefix_sum_bs was not empty");
-            radix_prefix_large_bind_groups.push(create_bind_group(
+        let radix_histogram_bg = match ping_pong {
+            true => create_bind_group(
                 &device,
-                &radix_prefix_large_l,
-                vec![&histogram_b, &prefix_sum_bs[0]],
-                "radix sort prefix sum large bind group",
-            ));
-            for i in 0..prefix_sum_bs.len() - 1 {
-                radix_prefix_large_bind_groups.push(create_bind_group(
-                    &device,
-                    &create_radix_bgl_prefix_large(&device),
-                    vec![&prefix_sum_bs[i], &prefix_sum_bs[i + 1]],
-                    "radix sort prefix sum large bind group",
-                ));
-            }
-        } else {
-            log::info!("We don't have any prefix sum buffers so we don't need any bindgroups to them, but we still need to create a small bind group on the histogram");
-        }
-
-        let radix_prefix_small_bg = match prefix_sum_bs.is_empty() {
-            true => {
-                log::info!("Create a small bind group directly on the histogram buffer");
-                create_bind_group(
-                    &device,
-                    &radix_prefix_small_l,
-                    vec![&histogram_b],
-                    "radix sort prefix sum small bind group",
-                )
-            }
+                &radix_histogram_l,
+                vec![
+                    &radix_uniforms_b,
+                    &buffers.indices,
+                    &buffers.morton_codes,
+                    &buffers.histogram,
+                ],
+                "radix sort histogram bind group",
+            ),
             false => create_bind_group(
                 &device,
-                &radix_prefix_small_l,
-                vec![&prefix_sum_bs.last().unwrap()],
-                "radix sort prefix sum small bind group",
+                &radix_histogram_l,
+                vec![
+                    &radix_uniforms_b,
+                    &buffers.indices_2,
+                    &buffers.morton_codes_2,
+                    &buffers.histogram,
+                ],
+                "radix sort histogram bind group",
             ),
         };
 
-        let radix_scatter_bg = create_bind_group(
-            &device,
-            &radix_scatter_l,
-            vec![
-                &radix_uniforms_b,
-                &indices_b,
-                &morton_code_b,
-                &indices_2_b,
-                &morton_code_2_b,
-                &histogram_b,
-            ],
-            "radix sort scatter bind group",
-        );
-        // endregion
+        let radix_index_bg = match ping_pong {
+            true => create_bind_group(
+                &device,
+                &radix_index_l,
+                vec![
+                    &radix_uniforms_b,
+                    &buffers.morton_codes,
+                    &buffers.histogram,
+                    &buffers.final_locations,
+                ],
+                "radix sort index bind group",
+            ),
+            false => create_bind_group(
+                &device,
+                &radix_index_l,
+                vec![
+                    &radix_uniforms_b,
+                    &buffers.morton_codes_2,
+                    &buffers.histogram,
+                    &buffers.final_locations,
+                ],
+                "radix sort index bind group",
+            ),
+        };
+
+        let mut radix_scatter_uniforms_vec = vec![];
+        let mut radix_scatter_bg_vec = vec![];
+        for j in 0..NUMBER_SECTIONS_SCATTER {
+            let radix_scatter_uniforms = create_radix_scatter_uniforms(&device, j);
+            let radix_scatter_bg = match ping_pong {
+                true => create_bind_group(
+                    &device,
+                    &radix_scatter_l,
+                    vec![
+                        &radix_scatter_uniforms,
+                        &buffers.indices,
+                        &buffers.morton_codes,
+                        &buffers.indices_2,
+                        &buffers.morton_codes_2,
+                        &buffers.final_locations,
+                    ],
+                    "radix sort scatter bind group",
+                ),
+                false => create_bind_group(
+                    &device,
+                    &radix_scatter_l,
+                    vec![
+                        &radix_scatter_uniforms,
+                        &buffers.indices_2,
+                        &buffers.morton_codes_2,
+                        &buffers.indices,
+                        &buffers.morton_codes,
+                        &buffers.final_locations,
+                    ],
+                    "radix sort scatter bind group",
+                ),
+            };
+            radix_scatter_uniforms_vec.push(radix_scatter_uniforms);
+            radix_scatter_bg_vec.push(radix_scatter_bg);
+        }
         {
-            let mut compute_pass = encoder.begin_compute_pass(
-                &(ComputePassDescriptor {
-                    label: Some("Histogram calculation"),
-                }),
-            );
+            let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("Histogram calculation"),
+            });
             compute_pass.set_pipeline(&radix_histogram_p);
             compute_pass.set_bind_group(0, &radix_histogram_bg, &[]);
             compute_pass.insert_debug_marker("histogram pass");
             compute_pass.dispatch_workgroups(number_of_workgroups, 1, 1);
         }
         {
-            let mut compute_pass = encoder.begin_compute_pass(
-                &(ComputePassDescriptor {
-                    label: Some("Large Prefix Sum part 1"),
-                }),
-            );
-            let buffer_num_items = calculate_num_items_prefix_buffers(NUM_TRIANGLES as u64);
+            let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("Large Prefix Sum part 1"),
+            });
             compute_pass.set_pipeline(&radix_prefix_large_p);
-            assert!(buffer_num_items.len() == radix_prefix_large_bind_groups.len());
 
             for (i, large_bg) in radix_prefix_large_bind_groups.iter().enumerate() {
                 compute_pass.insert_debug_marker("large prefix");
                 compute_pass.set_bind_group(0, &large_bg, &[]);
-                // let mut prefix_workgroup = 0;
-
                 let prefix_workgroup = match i {
                     0 => div_ceil_u64(
                         histogram_buffer_number_elements as u64,
@@ -856,11 +1165,9 @@ async fn run() {
             }
         }
         {
-            let mut compute_pass = encoder.begin_compute_pass(
-                &(ComputePassDescriptor {
-                    label: Some("Small Prefix Sum"),
-                }),
-            );
+            let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("Small Prefix Sum"),
+            });
             log::info!("run the small prefix bind group");
             compute_pass.set_pipeline(&radix_prefix_small_p);
             compute_pass.set_bind_group(0, &radix_prefix_small_bg, &[]);
@@ -868,11 +1175,9 @@ async fn run() {
             compute_pass.dispatch_workgroups(1, 1, 1);
         }
         {
-            let mut compute_pass = encoder.begin_compute_pass(
-                &(ComputePassDescriptor {
-                    label: Some("Large Prefix Sum part 2"),
-                }),
-            );
+            let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("Large Prefix Sum part 2"),
+            });
             compute_pass.set_pipeline(&radix_prefix_large_p_2);
 
             let buffer_num_items = calculate_num_items_prefix_buffers(NUM_TRIANGLES as u64);
@@ -893,37 +1198,149 @@ async fn run() {
             }
         }
         {
-            let mut compute_pass = encoder.begin_compute_pass(
-                &(ComputePassDescriptor {
-                    label: Some("Final Scatter"),
-                }),
-            );
-            log::info!("scatter final results");
-            compute_pass.set_pipeline(&radix_scatter_p);
-            compute_pass.set_bind_group(0, &radix_scatter_bg, &[]);
-            compute_pass.insert_debug_marker("scatter");
+            let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("Indexing"),
+            });
+            compute_pass.set_pipeline(&radix_index_p);
+            compute_pass.set_bind_group(0, &radix_index_bg, &[]);
+            compute_pass.insert_debug_marker("index");
             compute_pass.dispatch_workgroups(number_of_workgroups, 1, 1);
         }
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("Scatter"),
+            });
+            compute_pass.set_pipeline(&radix_scatter_p);
+            compute_pass.insert_debug_marker("scatter");
+            for j in 0..NUMBER_SECTIONS_SCATTER {
+                compute_pass.set_bind_group(0, &radix_scatter_bg_vec[j as usize], &[]);
+                compute_pass.dispatch_workgroups(number_of_workgroups * 4, 1, 1);
+            }
+        }
     }
-    log::info!("submit");
+    #[cfg(radix_sort_readback)]
+    {
+        copy_buffer_to_buffer(
+            &mut encoder,
+            &buffers.morton_codes,
+            &radix_sort_morton_codes_readback_b,
+        );
+        copy_buffer_to_buffer(
+            &mut encoder,
+            &buffers.morton_codes_2,
+            &radix_sort_morton_codes_2_readback_b,
+        );
+    }
+    #[cfg(morton_code_readback)]
+    copy_buffer_to_buffer(&mut encoder, &buffers.morton_codes, &morton_code_readback_b);
+
     queue.submit(Some(encoder.finish()));
 
     device.stop_capture();
-}
 
-fn create_radix_uniforms_buffer(device: &Device, pass_number: u32) -> Buffer {
-    let radix_uniforms = RadixUniforms { pass_number };
+    #[cfg(morton_code_readback)]
+    {
+        let morton_code_readback_slice = morton_code_readback_b.slice(..);
+        // NOTE: We have to create the mapping THEN device.poll() before await
+        // the future. Otherwise the application will freeze.
+        let (morton_code_tx, morton_code_rx) =
+            futures_intrusive::channel::shared::oneshot_channel();
+        morton_code_readback_slice.map_async(MapMode::Read, move |result| {
+            morton_code_tx.send(result).unwrap();
+        });
+        device.poll(Maintain::Wait);
+        if let Some(Ok(())) = morton_code_rx.receive().await {
+            let morton_code_data = morton_code_readback_slice.get_mapped_range();
+            let morton_codes: Vec<u64> = bytemuck::cast_slice(&morton_code_data).to_vec();
+            drop(morton_code_data);
+            morton_code_readback_b.unmap();
+            let mut file = File::create("morton_codes.txt").unwrap();
+            for &value in &morton_codes {
+                let line = format!("{}\n", value);
+                file.write_all(&line.as_bytes()).unwrap();
+            }
 
-    let radix_uniforms_temp_buf: Vec<u8> = Vec::new();
-    let mut radix_uniforms_temp_buf_ub: UniformBuffer<Vec<u8>> =
-        UniformBuffer::new(radix_uniforms_temp_buf);
-    radix_uniforms_temp_buf_ub.write(&radix_uniforms).unwrap();
-    let radix_uniforms_b = device.create_buffer_init(&BufferInitDescriptor {
-        label: Some("radix uniforms buffer"),
-        contents: radix_uniforms_temp_buf_ub.as_ref(),
-        usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::UNIFORM,
-    });
-    radix_uniforms_b
+            let mut file_2 = File::create("indices.txt").unwrap();
+
+            for triangle in _triangles_copy.triangles {
+                let line = format!(
+                    "({}, {}, {})\n",
+                    triangle.indices.x, triangle.indices.y, triangle.indices.z
+                );
+                // Write bytes to file
+                file_2.write_all(&line.as_bytes()).unwrap();
+            }
+        } else {
+            panic!("failed to run compute on GPU!!!!!");
+        }
+    }
+
+    #[cfg(radix_sort_readback)]
+    {
+        let radix_sort_morton_codes_2_readback_slice =
+            radix_sort_morton_codes_2_readback_b.slice(..);
+        // NOTE: We have to create the mapping THEN device.poll() before awaiting
+        // the future. Otherwise the application will freeze.
+        let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
+        radix_sort_morton_codes_2_readback_slice.map_async(MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+
+        let radix_sort_morton_codes_readback_slice = radix_sort_morton_codes_readback_b.slice(..);
+        let (tx2, rx2) = futures_intrusive::channel::shared::oneshot_channel();
+        radix_sort_morton_codes_readback_slice.map_async(MapMode::Read, move |result| {
+            tx2.send(result).unwrap();
+        });
+
+        device.poll(Maintain::Wait);
+        if let (Some(Ok(())), Some(Ok(()))) = (rx.receive().await, rx2.receive().await) {
+            let radix_sort_morton_codes_readback_data =
+                radix_sort_morton_codes_readback_slice.get_mapped_range();
+            let radix_sort_morton_codes: Vec<u64> =
+                bytemuck::cast_slice(&radix_sort_morton_codes_readback_data).to_vec();
+            drop(radix_sort_morton_codes_readback_data);
+            radix_sort_morton_codes_readback_b.unmap();
+
+            let radix_sort_morton_codes_2_readback_data =
+                radix_sort_morton_codes_2_readback_slice.get_mapped_range();
+            let radix_sort_morton_codes_2: Vec<u64> =
+                bytemuck::cast_slice(&radix_sort_morton_codes_2_readback_data).to_vec();
+            drop(radix_sort_morton_codes_2_readback_data);
+            radix_sort_morton_codes_2_readback_b.unmap();
+
+            let mut sorted = true;
+            let mut all_zero = true;
+            for (x, i) in radix_sort_morton_codes_2.windows(2).enumerate() {
+                let before = i[0];
+                let after = i[1];
+                println!("{:6}, {:#018x}", x, before);
+                if before > after {
+                    println!("not sorted!");
+                    println!("bef: {:018x}", before);
+                    println!("aft: {:018x}", after);
+                    println!("xor: {:018x}", before ^ after);
+                    println!("leading_zeros: {}", (before ^ after).leading_zeros());
+                    sorted = false;
+                }
+                if before != 0u64 {
+                    all_zero = false;
+                }
+                if after != 0u64 {
+                    all_zero = false;
+                }
+            }
+            if !sorted {
+                log::error!("Not sorted!!!");
+            } else {
+                println!("Sorted !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            }
+            if all_zero {
+                log::error!("all zero!!!");
+            }
+        } else {
+            panic!("failed to run compute on GPU!!!!!");
+        }
+    }
 }
 
 fn main() {

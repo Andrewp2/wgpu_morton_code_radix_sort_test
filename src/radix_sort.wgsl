@@ -2,14 +2,13 @@
 struct TriangleIndices {
     tri_indices: vec3<u32>,
     // TODO: Think about this (we can fit one u32 for free, but not 3)
-    node_index: u32,
-    material_id: u32,
-    flags: u32,
+    // node_index: u32,
+    // material_id: u32,
+    // flags: u32,
 };
 
 
 struct PrefixUniforms {
-    // 0-12
     pass_number: u32,
 };
 
@@ -28,12 +27,6 @@ var<storage, read> triangles: array<TriangleIndices>;
 var<storage, read> codes: array<u32>;
 
 @group(0) @binding(3)
-var<storage, read> triangles_2: array<TriangleIndices>;
-
-@group(0) @binding(4)
-var<storage, read> codes_2: array<u32>;
-
-@group(0) @binding(5)
 var<storage, read_write> storage_histograms: array<u32>;
 
 var<workgroup> histogram: array<atomic<u32>, 64>;
@@ -53,22 +46,12 @@ var<workgroup> histogram: array<atomic<u32>, 64>;
 
 fn select_digit(id: u32) -> u32 {
     var val = 64u;
-    // determines if we're using the ping-pong buffer or not
-    let use_original_array = uniforms.pass_number % 2u == 0u;
     if uniforms.pass_number < 5u {
-        if use_original_array {
-            val = (codes[2u * id + 0u] >> (uniforms.pass_number * 6u)) & 63u;
-        } else {
-            val = (codes_2[2u * id + 0u] >> (uniforms.pass_number * 6u)) & 63u;
-        }
+        val = (codes[2u * id + 0u] >> (uniforms.pass_number * 6u)) & 63u;
     } else if uniforms.pass_number > 5u {
-        if use_original_array {
-            val = (codes[2u * id + 1u] >> ((uniforms.pass_number - 6u) * 6u + 4u)) & 63u;
-        } else {
-            val = (codes_2[2u * id + 1u] >> ((uniforms.pass_number - 6u) * 6u + 4u)) & 63u;
-        }
+        val = (codes[2u * id + 1u] >> ((uniforms.pass_number - 6u) * 6u + 4u)) & 63u;
     } else {
-        val = ((codes_2[2u * id + 0u] >> 30u) & 3u) | (((codes_2[2u * id + 1u]) & 15u) << 2u);
+        val = ((codes[2u * id + 0u] >> 30u) & 3u) | (((codes[2u * id + 1u]) & 15u) << 2u);
     }
     return val;
 }
