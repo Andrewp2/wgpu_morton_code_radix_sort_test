@@ -21,8 +21,8 @@ use wgpu::{
     ShaderModuleDescriptor, ShaderSource, ShaderStages, *,
 };
 
-const NUM_VERTICES: u32 = 1000000u32;
-const NUM_TRIANGLES: u32 = 3000000u32;
+const NUM_VERTICES: u32 = 2000000u32;
+const NUM_TRIANGLES: u32 = 6000000u32;
 const BITS_PER_PASS: u32 = 8;
 const HISTOGRAM_SIZE: u32 = 1 << BITS_PER_PASS;
 const WORKGROUP_SIZE: u32 = 256u32;
@@ -768,7 +768,7 @@ fn create_all_pipelines(
             entry_point: "radix_sort_index",
         }),
         device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some("morton code compute pipeline"),
+            label: Some("scatter compute p"),
             layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
                 label: Some("Compute Pipeline Layout"),
                 bind_group_layouts: &[radix_scatter_l],
@@ -1049,8 +1049,7 @@ async fn run() {
         compute_pass.set_pipeline(&morton_code_p);
         compute_pass.set_bind_group(0, &morton_code_bg, &[]);
         compute_pass.insert_debug_marker("compute morton code");
-        // morton code dispatch is only 64 wide, not a full 256.
-        let num_workgroups_x = div_ceil_u32(NUM_TRIANGLES, 32) / 8;
+        let num_workgroups_x = div_ceil_u32(div_ceil_u32(NUM_TRIANGLES, 256), 8);
         compute_pass.dispatch_workgroups(num_workgroups_x, 8, 1);
     }
 
@@ -1223,7 +1222,7 @@ async fn run() {
             for j in 0..NUMBER_SECTIONS_SCATTER {
                 compute_pass.set_bind_group(0, &radix_scatter_bg_vec[j as usize], &[]);
                 // multiplying by 4 because scatter only uses 64 lanes
-                compute_pass.dispatch_workgroups(number_of_workgroups * 4, 1, 1);
+                compute_pass.dispatch_workgroups(number_of_workgroups, 1, 1);
             }
         }
     }

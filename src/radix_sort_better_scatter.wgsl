@@ -31,7 +31,7 @@ var<storage, read_write> codes_2: array<u32>;
 @group(0) @binding(5)
 var<storage, read> final_locations: array<u32>;
 
-@compute @workgroup_size(64, 1, 1)
+@compute @workgroup_size(256, 1, 1)
 fn radix_sort_scatter(
     @builtin(global_invocation_id) invocation_id: vec3<u32>,
     @builtin(local_invocation_id) local_workgroup_invocation_id: vec3<u32>,
