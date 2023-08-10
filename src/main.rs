@@ -1,10 +1,11 @@
 use std::{
     borrow::Cow,
     cmp::PartialEq,
-    fs::File,
-    io::Write,
     ops::{Add, Rem, Sub},
 };
+
+#[cfg(morton_code_readback)]
+use std::{fs::File, io::Write};
 
 use encase::{private::WriteInto, ShaderType, StorageBuffer, UniformBuffer};
 use extended_morton_coder::MortonCodeGenerator;
@@ -22,7 +23,7 @@ use wgpu::{
 
 const NUM_VERTICES: u32 = 1000000u32;
 const NUM_TRIANGLES: u32 = 3000000u32;
-const BITS_PER_PASS: u32 = 6;
+const BITS_PER_PASS: u32 = 8;
 const HISTOGRAM_SIZE: u32 = 1 << BITS_PER_PASS;
 const WORKGROUP_SIZE: u32 = 256u32;
 const ITEMS_PROCESSED_PER_LANE_HISTOGRAM_PASS: u32 = 1u32;
@@ -149,7 +150,7 @@ fn create_all_buffers(
     let final_locations = device.create_buffer(&BufferDescriptor {
         label: Some("final locations"),
         size: (NUM_TRIANGLES * 4) as u64,
-        usage: BufferUsages::STORAGE,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
     Buffers {
@@ -796,7 +797,7 @@ fn create_all_shader_modules(device: &Device) -> ShaderModules {
         }),
         radix_sort_histogram: device.create_shader_module(ShaderModuleDescriptor {
             label: Some("radix_sort_histogram_module"),
-            source: ShaderSource::Wgsl(Cow::Borrowed(include_str!("radix_sort.wgsl"))),
+            source: ShaderSource::Wgsl(Cow::Borrowed(include_str!("radix_sort_histogram.wgsl"))),
         }),
         radix_sort_prefix_large: device.create_shader_module(ShaderModuleDescriptor {
             label: Some("radix_sort_prefix_large_module"),
@@ -916,7 +917,14 @@ async fn run() {
     #[cfg(morton_code_readback)]
     let morton_code_readback_b = device.create_buffer(&BufferDescriptor {
         label: Some("morton code readback buffer"),
-        size: (NUM_TRIANGLES * 8) as u64,
+        size: buffers.morton_codes.size(),
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    #[cfg(final_locations_readback)]
+    let final_locations_readback_b = device.create_buffer(&BufferDescriptor {
+        label: Some("final locations readback buffer"),
+        size: buffers.final_locations.size(),
         usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -1042,11 +1050,11 @@ async fn run() {
         compute_pass.set_bind_group(0, &morton_code_bg, &[]);
         compute_pass.insert_debug_marker("compute morton code");
         // morton code dispatch is only 64 wide, not a full 256.
-        compute_pass.dispatch_workgroups(div_ceil_u32(NUM_TRIANGLES, 64), 1, 1);
+        let num_workgroups_x = div_ceil_u32(NUM_TRIANGLES, 32) / 8;
+        compute_pass.dispatch_workgroups(num_workgroups_x, 8, 1);
     }
 
-    // TODO: Change back to 11
-    for i in 0..11 {
+    for i in 0..8 {
         let radix_uniforms_b = create_index_uniforms(&device, i);
 
         let ping_pong = i % 2 == 0;
@@ -1214,6 +1222,7 @@ async fn run() {
             compute_pass.insert_debug_marker("scatter");
             for j in 0..NUMBER_SECTIONS_SCATTER {
                 compute_pass.set_bind_group(0, &radix_scatter_bg_vec[j as usize], &[]);
+                // multiplying by 4 because scatter only uses 64 lanes
                 compute_pass.dispatch_workgroups(number_of_workgroups * 4, 1, 1);
             }
         }
@@ -1233,6 +1242,12 @@ async fn run() {
     }
     #[cfg(morton_code_readback)]
     copy_buffer_to_buffer(&mut encoder, &buffers.morton_codes, &morton_code_readback_b);
+    #[cfg(final_locations_readback)]
+    copy_buffer_to_buffer(
+        &mut encoder,
+        &buffers.final_locations,
+        &final_locations_readback_b,
+    );
 
     queue.submit(Some(encoder.finish()));
 
@@ -1310,16 +1325,16 @@ async fn run() {
 
             let mut sorted = true;
             let mut all_zero = true;
-            for (x, i) in radix_sort_morton_codes_2.windows(2).enumerate() {
+            for (x, i) in radix_sort_morton_codes.windows(2).enumerate() {
                 let before = i[0];
                 let after = i[1];
-                println!("{:6}, {:#018x}", x, before);
+                //println!("{:6}, {:#018x}", x, before);
                 if before > after {
-                    println!("not sorted!");
-                    println!("bef: {:018x}", before);
-                    println!("aft: {:018x}", after);
-                    println!("xor: {:018x}", before ^ after);
-                    println!("leading_zeros: {}", (before ^ after).leading_zeros());
+                    // println!("not sorted!");
+                    // println!("bef: {:018x}", before);
+                    // println!("aft: {:018x}", after);
+                    // println!("xor: {:018x}", before ^ after);
+                    //println!("leading_zeros: {}", (before ^ after).leading_zeros());
                     sorted = false;
                 }
                 if before != 0u64 {
@@ -1341,6 +1356,26 @@ async fn run() {
             panic!("failed to run compute on GPU!!!!!");
         }
     }
+
+    #[cfg(final_locations_readback)]
+    {
+        let slice = final_locations_readback_b.slice(..);
+        let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
+        slice.map_async(MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+        device.poll(Maintain::Wait);
+        if let Some(Ok(())) = rx.receive().await {
+            let readback_data = slice.get_mapped_range();
+            let final_locations: Vec<u32> = bytemuck::cast_slice(&readback_data).to_vec();
+            drop(readback_data);
+            final_locations_readback_b.unmap();
+
+            for (i, loc) in final_locations.iter().enumerate() {
+                println!("i: {}, loc: {}", i, loc);
+            }
+        }
+    }
 }
 
 fn main() {
@@ -1356,6 +1391,15 @@ mod tests {
             0..=4 => (code_1 >> (pass_number * 6)) & 63,
             5 => ((code_1 >> 30) & 3) | ((code_2 & 15) << 2),
             6..=10 => (code_2 >> ((pass_number - 6) * 6 + 4)) & 63,
+            _ => panic!(),
+        };
+        return val;
+    }
+
+    fn select_digit_8(pass_number: u32, code_1: u32, code_2: u32) -> u32 {
+        let val = match pass_number {
+            0..=3 => (code_1 >> (pass_number * 8)) & 255,
+            4..=8 => (code_2 >> ((pass_number - 4) * 8)) & 255,
             _ => panic!(),
         };
         return val;
@@ -1386,6 +1430,19 @@ mod tests {
             } else {
                 assert_eq!(15, selected);
             }
+        }
+    }
+
+    #[test]
+    fn digit_test_8() {
+        let digit: u64 = 255;
+
+        for i in 0..8 {
+            let y: u64 = digit.wrapping_shl(i * 8);
+            let hi: u32 = (y >> 32) as u32;
+            let lo: u32 = (y & (u32::MAX as u64)) as u32;
+            let selected = select_digit_8(i as u32, lo, hi);
+            assert_eq!(255, selected);
         }
     }
 }

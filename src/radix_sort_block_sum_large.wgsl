@@ -1,8 +1,3 @@
-const NUM_BANKS = 32u;
-const LOG_NUM_BANKS = 5u;
-const BITS_PER_KEY = 64u;
-const BITS_PER_DIGIT = 5u;
-
 // guaranteed to be padded out to multiple of 256
 @group(0) @binding(0)
 var<storage, read_write> vals: array<u32>;
@@ -57,7 +52,6 @@ fn radix_sort_block_sum_large(
     prefix_sum_block_exclusive(wid, id);
     if wid == 255u {
         block_sums[id / 256u] = scratch[wid] + vals[id];
-        //block_sums[id / 256u] = scratch[wid] + vals[id];
     }
     vals[id] = scratch[wid];
 }

@@ -2,11 +2,6 @@ struct PrefixUniforms {
     pass_number: u32,
 };
 
-const NUM_BANKS = 32u;
-const LOG_NUM_BANKS = 5u;
-const BITS_PER_KEY = 64u;
-const BITS_PER_DIGIT = 5u;
-
 @group(0) @binding(0)
 var<uniform> uniforms: PrefixUniforms;
 
@@ -19,19 +14,17 @@ var<storage, read> storage_histograms: array<u32>;
 @group(0) @binding(3)
 var<storage, read_write> final_locations: array<u32>;
 
-var<workgroup> histogram: array<atomic<u32>, 64>;
-var<workgroup> histogram_na: array<u32, 64>;
+var<workgroup> histogram: array<atomic<u32>, 256>;
+var<workgroup> histogram_na: array<u32, 256>;
 var<workgroup> sorting_scratch: array<u32, 256>;
 var<workgroup> local_ids: array<u32, 256>;
 
 fn select_digit(id: u32) -> u32 {
-    var val = 64u;
-    if uniforms.pass_number < 5u {
-        val = (codes[2u * id + 0u] >> (uniforms.pass_number * 6u)) & 63u;
-    } else if uniforms.pass_number > 5u {
-        val = (codes[2u * id + 1u] >> ((uniforms.pass_number - 6u) * 6u + 4u)) & 63u;
+    var val = 256u;
+    if uniforms.pass_number < 4u {
+        val = (codes[2u * id] >> (uniforms.pass_number * 8u)) & 255u;
     } else {
-        val = ((codes[2u * id + 0u] >> 30u) & 3u) | (((codes[2u * id + 1u]) & 15u) << 2u);
+        val = (codes[2u * id + 1u] >> ((uniforms.pass_number - 4u) * 8u)) & 255u;
     }
     return val;
 }
@@ -48,30 +41,25 @@ fn prefix_sum_swap(wid: u32, lo: u32, hi: u32) {
 fn prefix_sum_block_exclusive(wid: u32, prefix_sum_size: u32) {
     for (var i: u32 = 1u; i < prefix_sum_size; i = i << 1u) {
         workgroupBarrier();
-        if wid < prefix_sum_size {
-            if wid % (2u * i) == 0u {
-                histogram_na[wid + (2u * i) - 1u] += histogram_na[wid + i - 1u];
-            }
+        if wid % (2u * i) == 0u {
+            histogram_na[wid + (2u * i) - 1u] += histogram_na[wid + i - 1u];
         }
     }
     workgroupBarrier();
     // special case for first iteration
-    if wid < prefix_sum_size {
-        if wid % prefix_sum_size == 0u {
-        // 64 / 2 - 1 = 31
-            let before = histogram_na[(prefix_sum_size / 2u) - 1u];
+    if wid % prefix_sum_size == 0u {
+        // 256 / 2 - 1 = 127
+        let before = histogram_na[(prefix_sum_size / 2u) - 1u];
 
-            histogram_na[(prefix_sum_size / 2u) - 1u] = 0u;
-            histogram_na[prefix_sum_size - 1u] = before;
-        }
+        histogram_na[(prefix_sum_size / 2u) - 1u] = 0u;
+        histogram_na[prefix_sum_size - 1u] = before;
     }
-    // 32 16 8 4 2
+    
+    // 128 64 32 16 8 4 2
     for (var i: u32 = prefix_sum_size / 2u; i > 1u; i = i >> 1u) {
         workgroupBarrier();
-        if wid < prefix_sum_size {
-            if wid % i == 0u {
-                prefix_sum_swap(wid, (i / 2u) - 1u, i - 1u);
-            }
+        if wid % i == 0u {
+            prefix_sum_swap(wid, (i / 2u) - 1u, i - 1u);
         }
     }
     workgroupBarrier();
@@ -149,16 +137,11 @@ fn radix_sort_index(
         atomicAdd(&histogram[digit], 1u);
     }
     workgroupBarrier();
-    var b = 1000u;
-    if wid < 64u {
-        b = atomicLoad(&histogram[wid]);
-    }
+    let b = atomicLoad(&histogram[wid]);
     workgroupBarrier();
-    if wid < 64u {
-        histogram_na[wid] = b;
-    }
+    histogram_na[wid] = b;
     workgroupBarrier();
-    prefix_sum_block_exclusive(wid, 64u);
+    prefix_sum_block_exclusive(wid, 256u);
     workgroupBarrier();
     // local_id is now filled with sorted index
     // doing a prefix sum and calculating:
