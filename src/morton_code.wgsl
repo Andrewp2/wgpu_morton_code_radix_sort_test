@@ -25,10 +25,10 @@ struct TriangleIndices {
 };
 
 struct MortonCodeUniforms {
-    lut: array<u32, 4608>,
-    size_lut: array<u32, SIZE_LUT_NUMBER_OF_POSSIBLE_VALUES_U32>,
-    //lut: array<vec4<u32> 1152>, 
-    //size_lut: array<vec4<u32>, SIZE_LUT_NUMBER_OF_POSSIBLE_VALUES_UVEC>,
+    //lut: array<u32, 4608>,
+    //size_lut: array<u32, SIZE_LUT_NUMBER_OF_POSSIBLE_VALUES_U32>,
+    lut: array<vec4<u32>, 1152>, 
+    size_lut: array<vec4<u32>, SIZE_LUT_NUMBER_OF_POSSIBLE_VALUES_UVEC>,
 
     morton_index_scale: f32,
     offset: vec3<f32>,
@@ -39,7 +39,7 @@ struct MortonCodeUniforms {
 
 // note - this is intended to be storage, easy workaround some issues with creating type as a uniform https://github.com/teoxoy/encase/issues/43
 @group(0) @binding(0)
-var<storage, read> uniforms: MortonCodeUniforms;
+var<uniform> uniforms: MortonCodeUniforms;
 
 @group(0) @binding(1)
 var<storage, read> vertices: array<Vertex>;
@@ -77,21 +77,93 @@ fn morton_code(
     var morton_lo = 0u;
 
     for (var i: i32 = 0; i < 3; i += 1) {
-        morton_lo |= uniforms.lut[translate_coords_lut(0 + (3 * i), i32((p.x >> (u32(i) * 3u))), 0)];
-        morton_lo |= uniforms.lut[translate_coords_lut(1 + (3 * i), i32((p.y >> (u32(i) * 3u))), 0)];
-        morton_lo |= uniforms.lut[translate_coords_lut(2 + (3 * i), i32((p.z >> (u32(i) * 3u))), 0)];
+        var first = translate_coords_lut(0 + (3 * i), i32((p.x >> (u32(i) * 3u))), 0) / 4;
+        if first % 4 == 0 {
+            morton_lo |= uniforms.lut[first / 4].x;
+        } else if first % 4 == 1 {
+            morton_lo |= uniforms.lut[first / 4].y;
+        } else if first % 4 == 2 {
+            morton_lo |= uniforms.lut[first / 4].z;
+        } else {
+            morton_lo |= uniforms.lut[first / 4].w;
+        }
+        first = translate_coords_lut(1 + (3 * i), i32((p.y >> (u32(i) * 3u))), 0) / 4;
+        if first % 4 == 0 {
+            morton_lo |= uniforms.lut[first / 4].x;
+        } else if first % 4 == 1 {
+            morton_lo |= uniforms.lut[first / 4].y;
+        } else if first % 4 == 2 {
+            morton_lo |= uniforms.lut[first / 4].z;
+        } else {
+            morton_lo |= uniforms.lut[first / 4].w;
+        }
+        first = translate_coords_lut(2 + (3 * i), i32((p.z >> (u32(i) * 3u))), 0) / 4;
+        if first % 4 == 0 {
+            morton_lo |= uniforms.lut[first / 4].x;
+        } else if first % 4 == 1 {
+            morton_lo |= uniforms.lut[first / 4].y;
+        } else if first % 4 == 2 {
+            morton_lo |= uniforms.lut[first / 4].z;
+        } else {
+            morton_lo |= uniforms.lut[first / 4].w;
+        }
     }
 
-    morton_lo |= uniforms.size_lut[i32(j * 2u)];
+    let size_lut_loc = i32(j * 2u) / 4;
+    if size_lut_loc % 4 == 0 {
+        morton_lo |= uniforms.size_lut[size_lut_loc].x;
+    } else if size_lut_loc % 4 == 1 {
+        morton_lo |= uniforms.size_lut[size_lut_loc].y;
+    } else if size_lut_loc % 4 == 1 {
+        morton_lo |= uniforms.size_lut[size_lut_loc].z;
+    } else {
+        morton_lo |= uniforms.size_lut[size_lut_loc].w;
+    }
 
     var morton_hi = 0u;
     for (var i: i32 = 0; i < 3; i += 1) {
-        morton_hi |= uniforms.lut[translate_coords_lut(0 + (3 * i), i32((p.x >> (u32(i) * 3u))), 1)];
-        morton_hi |= uniforms.lut[translate_coords_lut(1 + (3 * i), i32((p.y >> (u32(i) * 3u))), 1)];
-        morton_hi |= uniforms.lut[translate_coords_lut(2 + (3 * i), i32((p.z >> (u32(i) * 3u))), 1)];
+        var first = translate_coords_lut(0 + (3 * i), i32((p.x >> (u32(i) * 3u))), 1);
+        if first % 4 == 0 {
+            morton_hi |= uniforms.lut[first / 4].x;
+        } else if first % 4 == 1 {
+            morton_hi |= uniforms.lut[first / 4].y;
+        } else if first % 4 == 2 {
+            morton_hi |= uniforms.lut[first / 4].z;
+        } else if first % 4 == 3 {
+            morton_hi |= uniforms.lut[first / 4].w;
+        }
+        first = translate_coords_lut(1 + (3 * i), i32((p.y >> (u32(i) * 3u))), 1);
+        if first % 4 == 0 {
+            morton_hi |= uniforms.lut[first / 4].x;
+        } else if first % 4 == 1 {
+            morton_hi |= uniforms.lut[first / 4].y;
+        } else if first % 4 == 2 {
+            morton_hi |= uniforms.lut[first / 4].z;
+        } else if first % 4 == 3 {
+            morton_hi |= uniforms.lut[first / 4].w;
+        }
+        first = translate_coords_lut(2 + (3 * i), i32((p.z >> (u32(i) * 3u))), 1);
+        if first % 4 == 0 {
+            morton_hi |= uniforms.lut[first / 4].x;
+        } else if first % 4 == 1 {
+            morton_hi |= uniforms.lut[first / 4].y;
+        } else if first % 4 == 2 {
+            morton_hi |= uniforms.lut[first / 4].z;
+        } else if first % 4 == 3 {
+            morton_hi |= uniforms.lut[first / 4].w;
+        }
     }
 
-    morton_hi |= uniforms.size_lut[i32(j * 2u) + 1];
+    let size_lut_loc_2 = (i32(j * 2u) + 1) / 4;
+    if size_lut_loc_2 % 4 == 0 {
+        morton_hi |= uniforms.size_lut[size_lut_loc_2].x;
+    } else if size_lut_loc_2 % 4 == 1 {
+        morton_hi |= uniforms.size_lut[size_lut_loc_2].y;
+    } else if size_lut_loc_2 % 4 == 2 {
+        morton_hi |= uniforms.size_lut[size_lut_loc_2].z;
+    } else {
+        morton_hi |= uniforms.size_lut[size_lut_loc_2].w;
+    }
     morton_codes[(id * 2u) + 0u] = morton_lo;
     morton_codes[(id * 2u) + 1u] = morton_hi;
 }

@@ -9,7 +9,7 @@ use std::{fs::File, io::Write};
 
 use encase::{private::WriteInto, ShaderType, StorageBuffer, UniformBuffer};
 use extended_morton_coder::MortonCodeGenerator;
-use glam::{UVec3, Vec2, Vec3};
+use glam::{UVec3, UVec4, Vec2, Vec3};
 use rand::{distributions::Uniform, prelude::Distribution, Rng};
 use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
@@ -79,6 +79,16 @@ pub struct MortonUniforms {
     multiplier: Vec3,
 }
 
+#[derive(ShaderType)]
+pub struct RealMortonUniforms {
+    lut: [UVec4; 1152],
+    size_lut: [UVec4; 1 << (extended_morton_coder::SIZE_LUT_NUMBER_OF_BITS - 1)],
+    morton_index_scale: f32,
+    offset: Vec3,
+    size_multiplier: f32,
+    multiplier: Vec3,
+}
+
 /// Uniforms needed for digit selection in radix sort.
 #[derive(ShaderType)]
 pub struct RadixUniforms {
@@ -103,6 +113,75 @@ pub struct Buffers {
     final_locations: Buffer,
 }
 
+fn create_radix_scatter_uniforms(device: &Device, scatter_step: u32) -> Buffer {
+    let radix_scatter_uniforms = ScatterUniforms {
+        scatter_step,
+        number_sections: NUMBER_SECTIONS_SCATTER,
+    };
+
+    let radix_scatter_uniforms_temp_buf: Vec<u8> = Vec::new();
+    let mut radix_scatter_uniforms_temp_buf_ub: UniformBuffer<Vec<u8>> =
+        UniformBuffer::new(radix_scatter_uniforms_temp_buf);
+    radix_scatter_uniforms_temp_buf_ub
+        .write(&radix_scatter_uniforms)
+        .unwrap();
+    let radix_scatter_uniforms_b = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("radix scatter uniforms buffer"),
+        contents: radix_scatter_uniforms_temp_buf_ub.as_ref(),
+        usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+    });
+    radix_scatter_uniforms_b
+}
+
+fn create_index_uniforms(device: &Device, pass_number: u32) -> Buffer {
+    let radix_uniforms = RadixUniforms { pass_number };
+
+    let radix_uniforms_temp_buf: Vec<u8> = Vec::new();
+    let mut radix_uniforms_temp_buf_ub: UniformBuffer<Vec<u8>> =
+        UniformBuffer::new(radix_uniforms_temp_buf);
+    radix_uniforms_temp_buf_ub.write(&radix_uniforms).unwrap();
+    let radix_uniforms_b = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("radix uniforms buffer"),
+        contents: radix_uniforms_temp_buf_ub.as_ref(),
+        usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+    });
+    radix_uniforms_b
+}
+
+/// Creates the morton uniforms needed for the shader from the MortonCodeGenerator produced on the CPU.
+/// Need this function in order to flatten the 2d arrays into 1d arrays, and to convert from u64 to 2x the u32s.
+fn create_morton_uniforms(morton_code_generator: &MortonCodeGenerator) -> RealMortonUniforms {
+    let lut: Vec<u32> = morton_code_generator
+        .lut
+        .iter()
+        .flat_map(|x| x.iter().flat_map(|y| [(*y >> 0) as u32, (*y >> 32) as u32]))
+        .collect();
+    let new_lut: Vec<UVec4> = lut
+        .chunks(4)
+        .map(|x| UVec4::new(x[0], x[1], x[2], x[3]))
+        .collect();
+    assert!(lut.len() == 4608, "lut is the wrong length");
+    let size_lut: Vec<u32> = morton_code_generator
+        .size_lut
+        .iter()
+        .flat_map(|x| [(*x >> 0) as u32, (*x >> 32) as u32])
+        .collect();
+    let new_size_lut: Vec<UVec4> = size_lut
+        .chunks(4)
+        .map(|x| UVec4::new(x[0], x[1], x[2], x[3]))
+        .collect();
+    assert_eq!(new_size_lut.len() as u32, 2048);
+    assert_eq!(new_lut.len() as u32, 1152);
+    RealMortonUniforms {
+        lut: new_lut.try_into().unwrap(),
+        size_lut: new_size_lut.try_into().unwrap(),
+        morton_index_scale: morton_code_generator.morton_index_scale,
+        offset: morton_code_generator.offset,
+        size_multiplier: morton_code_generator.size_multiplier,
+        multiplier: morton_code_generator.multiplier,
+    }
+}
+
 fn create_all_buffers(
     device: &Device,
     vertices: Vertices,
@@ -111,12 +190,15 @@ fn create_all_buffers(
     histogram_buffer_number_elements: u32,
 ) -> Buffers {
     let morton_uniforms = create_morton_uniforms(&morton_code_generator);
-    let morton_uniforms_b = create_buffer(
-        morton_uniforms,
-        &device,
-        "morton uniform buffer",
-        BufferUsages::STORAGE,
-    );
+    let morton_uniforms_temp_buf: Vec<u8> = Vec::new();
+    let mut morton_uniforms_temp_buf_ub: UniformBuffer<Vec<u8>> =
+        UniformBuffer::new(morton_uniforms_temp_buf);
+    morton_uniforms_temp_buf_ub.write(&morton_uniforms).unwrap();
+    let morton_uniforms_b = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("morton uniforms buffer"),
+        contents: morton_uniforms_temp_buf_ub.as_ref(),
+        usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+    });
     let histogram_b = device.create_buffer(&BufferDescriptor {
         label: Some("original histogram buffer"),
         size: (histogram_buffer_number_elements * 4) as u64,
@@ -297,31 +379,6 @@ fn create_scene() -> (
     )
 }
 
-/// Creates the morton uniforms needed for the shader from the MortonCodeGenerator produced on the CPU.
-/// Need this function in order to flatten the 2d arrays into 1d arrays, and to convert from u64 to 2x the u32s.
-fn create_morton_uniforms(morton_code_generator: &MortonCodeGenerator) -> MortonUniforms {
-    let lut: Vec<u32> = morton_code_generator
-        .lut
-        .iter()
-        .flat_map(|x| x.iter().flat_map(|y| [(*y >> 0) as u32, (*y >> 32) as u32]))
-        .collect();
-    assert!(lut.len() == 4608, "lut is the wrong length");
-    let size_lut: Vec<u32> = morton_code_generator
-        .size_lut
-        .iter()
-        .flat_map(|x| [(*x >> 0) as u32, (*x >> 32) as u32])
-        .collect();
-    assert!(size_lut.len() == 8192);
-    MortonUniforms {
-        lut: lut.try_into().unwrap(),
-        size_lut: size_lut.try_into().unwrap(),
-        morton_index_scale: morton_code_generator.morton_index_scale,
-        offset: morton_code_generator.offset,
-        size_multiplier: morton_code_generator.size_multiplier,
-        multiplier: morton_code_generator.multiplier,
-    }
-}
-
 /// Calculates the size and number of large prefix buffers needed to radix sort that number of elements.
 fn calculate_num_items_prefix_buffers(num_elements: u64) -> Vec<u64> {
     // Multiply by number of values per radix pass because on the first pass we produce a histogram
@@ -386,7 +443,7 @@ fn create_morton_code_bind_group_layout(device: &Device) -> BindGroupLayout {
                 binding: 0,
                 visibility: ShaderStages::COMPUTE,
                 ty: BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: true },
+                    ty: BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
@@ -822,41 +879,6 @@ fn create_all_shader_modules(device: &Device) -> ShaderModules {
             ))),
         }),
     }
-}
-
-fn create_index_uniforms(device: &Device, pass_number: u32) -> Buffer {
-    let radix_uniforms = RadixUniforms { pass_number };
-
-    let radix_uniforms_temp_buf: Vec<u8> = Vec::new();
-    let mut radix_uniforms_temp_buf_ub: UniformBuffer<Vec<u8>> =
-        UniformBuffer::new(radix_uniforms_temp_buf);
-    radix_uniforms_temp_buf_ub.write(&radix_uniforms).unwrap();
-    let radix_uniforms_b = device.create_buffer_init(&BufferInitDescriptor {
-        label: Some("radix uniforms buffer"),
-        contents: radix_uniforms_temp_buf_ub.as_ref(),
-        usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::UNIFORM,
-    });
-    radix_uniforms_b
-}
-
-fn create_radix_scatter_uniforms(device: &Device, scatter_step: u32) -> Buffer {
-    let radix_scatter_uniforms = ScatterUniforms {
-        scatter_step,
-        number_sections: NUMBER_SECTIONS_SCATTER,
-    };
-
-    let radix_scatter_uniforms_temp_buf: Vec<u8> = Vec::new();
-    let mut radix_scatter_uniforms_temp_buf_ub: UniformBuffer<Vec<u8>> =
-        UniformBuffer::new(radix_scatter_uniforms_temp_buf);
-    radix_scatter_uniforms_temp_buf_ub
-        .write(&radix_scatter_uniforms)
-        .unwrap();
-    let radix_scatter_uniforms_b = device.create_buffer_init(&BufferInitDescriptor {
-        label: Some("radix scatter uniforms buffer"),
-        contents: radix_scatter_uniforms_temp_buf_ub.as_ref(),
-        usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST | BufferUsages::UNIFORM,
-    });
-    radix_scatter_uniforms_b
 }
 
 async fn run() {
