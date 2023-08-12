@@ -1,11 +1,3 @@
-const NUMBER_OF_BITS_FOR_SIZE: u32 = 6u;
-// 2 times number of bits
-const SIZE_LUT_NUMBER_OF_BITS: u32 = 12u;
-// 2^12 = 4096
-const SIZE_LUT_NUMBER_OF_POSSIBLE_VALUES: u32 = 4096u;
-const SIZE_LUT_NUMBER_OF_POSSIBLE_VALUES_U32: u32 = 8192u;
-const SIZE_LUT_NUMBER_OF_POSSIBLE_VALUES_UVEC: u32 = 2048u;
-
 struct Vertex {
     position: vec3<f32>,
     normal: vec3<f32>,
@@ -26,10 +18,7 @@ struct TriangleIndices {
 
 struct MortonCodeUniforms {
     lut: array<u32, 4608>,
-    size_lut: array<u32, SIZE_LUT_NUMBER_OF_POSSIBLE_VALUES_U32>,
-    //lut: array<vec4<u32> 1152>, 
-    //size_lut: array<vec4<u32>, SIZE_LUT_NUMBER_OF_POSSIBLE_VALUES_UVEC>,
-
+    size_lut: array<u32, 8192>,
     morton_index_scale: f32,
     offset: vec3<f32>,
     size_multiplier: f32,
@@ -50,7 +39,6 @@ var<storage, read> indices: array<TriangleIndices>;
 var<storage, read_write> morton_codes: array<u32>;
 
 var<workgroup> lut: array<u32, 4608>;
-var<workgroup> size_lut: array<u32, SIZE_LUT_NUMBER_OF_POSSIBLE_VALUES_U32>;
 
 fn translate_coords_lut(i: i32, byte: i32, first_or_last: i32) -> i32 {
     let starting_point = i * 512;
@@ -64,14 +52,12 @@ fn morton_code(
     @builtin(local_invocation_id) workgroup_id: vec3<u32>,
 ) {
     let wid = i32(workgroup_id.x);
-    for (var i: i32 = 0; i < 18; i += 1) {
-        lut[wid + (i * 256)] = uniforms.lut[wid + (i * 256)];
+    for (var i: i32 = 0; i < 4608; i += 256) {
+        lut[wid + i] = uniforms.lut[wid + i];
     }
-    for (var i = 0; i < 32; i += 1) {
-        size_lut[wid + (i * 256)] = uniforms.size_lut[wid + (i * 256)];
-    }
-    let id = invocation_id.y * (arrayLength(&indices) / 8u) + invocation_id.x;
-    if id > arrayLength(&indices) {
+    let length = arrayLength(&indices);
+    let id = invocation_id.y * (length / 8u) + invocation_id.x;
+    if id > length {
         return;
     }
 
@@ -91,7 +77,7 @@ fn morton_code(
         morton_lo |= lut[translate_coords_lut(1 + (3 * i), i32((p.y >> (u32(i) * 3u))), 0)];
         morton_lo |= lut[translate_coords_lut(2 + (3 * i), i32((p.z >> (u32(i) * 3u))), 0)];
     }
-    morton_lo |= size_lut[i32(j * 2u)];
+    morton_lo |= uniforms.size_lut[i32(j * 2u)];
     morton_codes[(id * 2u) + 0u] = morton_lo;
 
     var morton_hi = 0u;
@@ -100,6 +86,6 @@ fn morton_code(
         morton_hi |= lut[translate_coords_lut(1 + (3 * i), i32((p.y >> (u32(i) * 3u))), 1)];
         morton_hi |= lut[translate_coords_lut(2 + (3 * i), i32((p.z >> (u32(i) * 3u))), 1)];
     }
-    morton_hi |= size_lut[i32(j * 2u) + 1];
+    morton_hi |= uniforms.size_lut[i32(j * 2u) + 1];
     morton_codes[(id * 2u) + 1u] = morton_hi;
 }

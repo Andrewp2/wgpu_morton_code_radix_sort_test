@@ -138,11 +138,8 @@ fn radix_sort_index(
     }
     workgroupBarrier();
     let b = atomicLoad(&histogram[wid]);
-    workgroupBarrier();
     histogram_na[wid] = b;
-    workgroupBarrier();
     prefix_sum_block_exclusive(wid, 256u);
-    workgroupBarrier();
     // local_id is now filled with sorted index
     // doing a prefix sum and calculating:
     // local_id - histogram_na[digit] 
