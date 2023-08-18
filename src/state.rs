@@ -48,11 +48,7 @@ impl State {
 
         let (device, queue) = adapter
             .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: None,
-                    features: wgpu::Features::empty(),
-                    limits: wgpu::Limits::default(),
-                },
+                &wgpu::DeviceDescriptor::default(),
                 // Some(&std::path::Path::new("trace")), // Trace path
                 None,
             )
@@ -74,7 +70,7 @@ impl State {
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: surface_caps.present_modes[0],
+            present_mode: wgpu::PresentMode::Immediate,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
         };
@@ -143,7 +139,7 @@ impl State {
         }
 
         #[allow(unused_variables)]
-        run_compute_shaders(&self.device, &self.queue, &mut encoder);
+        run_compute_shaders(&self.device, &mut encoder);
 
         self.queue.submit(iter::once(encoder.finish()));
         output.present();

@@ -47,13 +47,9 @@ fn radix_sort_compute_histogram(
 ) {
     let id = invocation_id.x;
     let wid = workgroup_id.x;
-
     let num_elements = arrayLength(&codes) / 2u;
     let num_blocks_before_this = id / 256u;
-
-    // compute histogram and prefix sum
-
-    // id may go past the end of the array, so we must account for that by not incrementing the histogram.
+    // id may go past the end of the array, so we account for that by not incrementing the histogram.
     if id < num_elements {
         let digit = select_digit(id);
         atomicAdd(&histogram[digit], 1u);

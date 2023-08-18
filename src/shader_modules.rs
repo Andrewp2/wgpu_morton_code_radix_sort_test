@@ -34,11 +34,5 @@ pub fn create_all_shader_modules(device: &Device) -> ShaderModules {
             label: Some("radix_sort_index_module"),
             source: ShaderSource::Wgsl(Cow::Borrowed(include_str!("radix_sort_index.wgsl"))),
         }),
-        radix_sort_scatter: device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("radix_sort_scatter"),
-            source: ShaderSource::Wgsl(Cow::Borrowed(include_str!(
-                "radix_sort_better_scatter.wgsl"
-            ))),
-        }),
     }
 }

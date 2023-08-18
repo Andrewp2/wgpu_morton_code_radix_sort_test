@@ -21,7 +21,9 @@ fn prefix_sum_block_exclusive(wid: u32, offset: u32) {
     let v = block_sums[wid + offset];
     scratch[wid] = v;
     for (var i: u32 = 1u; i < 256u; i = i << 1u) {
-        workgroupBarrier();
+        if i >= 32u {
+            workgroupBarrier();
+        }
         if wid % (2u * i) == 0u {
             scratch[wid + (2u * i) - 1u] += scratch[wid + i - 1u];
         }
@@ -35,7 +37,9 @@ fn prefix_sum_block_exclusive(wid: u32, offset: u32) {
     }
     // 128 64 32 16 8 4 2
     for (var i: u32 = 128u; i > 1u; i = i >> 1u) {
-        workgroupBarrier();
+        if i >= 32u {
+            workgroupBarrier();
+        }
         if wid % i == 0u {
             prefix_sum_swap(wid, (i / 2u) - 1u, i - 1u);
         }

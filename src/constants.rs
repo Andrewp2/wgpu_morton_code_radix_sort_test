@@ -16,8 +16,6 @@ pub const ITEMS_PER_LARGE_PREFIX: u32 = 256u32;
 
 pub const MAX_ITEMS_IN_SMALL_PREFIX: u32 = 1024u32;
 
-pub const NUMBER_SECTIONS_SCATTER: u32 = 16u32;
-
 pub const NUM_PASSES: u32 = 8;
 
 pub const RNG_SEED: u64 = 7;

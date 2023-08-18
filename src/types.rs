@@ -74,7 +74,6 @@ pub struct Buffers {
     pub morton_codes: Buffer,
     pub morton_codes_2: Buffer,
     pub prefix_sums: Vec<Buffer>,
-    pub final_locations: Buffer,
 }
 
 pub struct ShaderModules {
@@ -83,5 +82,4 @@ pub struct ShaderModules {
     pub radix_sort_prefix_large: ShaderModule,
     pub radix_sort_prefix_small: ShaderModule,
     pub radix_sort_index: ShaderModule,
-    pub radix_sort_scatter: ShaderModule,
 }
