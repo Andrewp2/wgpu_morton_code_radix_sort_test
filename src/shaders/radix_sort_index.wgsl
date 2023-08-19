@@ -297,6 +297,7 @@ fn radix_sort_index(
         let y = offset_bmp[6u * wid + 1u];
         let z = offset_bmp[6u * wid + 2u];
         let final_location = offset_bmp[6u * wid + 3u];
+
         let code_1b = offset_bmp[6u * wid + 4u];
         let code_2b = offset_bmp[6u * wid + 5u];
         let tri = TriangleIndices(vec3<u32>(x, y, z));

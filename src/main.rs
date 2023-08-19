@@ -373,339 +373,6 @@ fn create_index_uniforms(device: &Device, pass_number: u32) -> Buffer {
     radix_uniforms_b
 }
 
-async fn run_headless() {
-    env_logger::init();
-    let instance = Instance::new(InstanceDescriptor {
-        backends: Backends::all(),
-        dx12_shader_compiler: Default::default(),
-    });
-    let adapter = instance
-        .request_adapter(&RequestAdapterOptions {
-            power_preference: PowerPreference::default(),
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        })
-        .await
-        .unwrap();
-    let (device, queue) = adapter
-        .request_device(&Default::default(), None)
-        .await
-        .unwrap();
-    let info = adapter.get_info();
-    log::info!("backend: {:?}", info.backend);
-
-    device.on_uncaptured_error(Box::new(move |error| {
-        log::error!("{}", &error);
-        panic!(
-            "wgpu error (handling all wgpu errors as fatal):\n{:?}\n{:?}",
-            &error, &info,
-        );
-    }));
-    device.start_capture();
-
-    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-        label: Some("command encoder"),
-    });
-
-    #[allow(unused_variables)]
-    let readback_buffers = run_compute_shaders(&device, &mut encoder);
-
-    queue.submit(Some(encoder.finish()));
-
-    device.stop_capture();
-    #[cfg(radix_sort_readback)]
-    let radix_sort_morton_codes_readback_b = &readback_buffers[0];
-    #[cfg(radix_sort_readback)]
-    let radix_sort_morton_codes_2_readback_b = &readback_buffers[1];
-
-    #[cfg(morton_code_readback)]
-    {
-        let morton_code_readback_slice = morton_code_readback_b.slice(..);
-        // NOTE: We have to create the mapping THEN device.poll() before await
-        // the future. Otherwise the application will freeze.
-        let (morton_code_tx, morton_code_rx) =
-            futures_intrusive::channel::shared::oneshot_channel();
-        morton_code_readback_slice.map_async(MapMode::Read, move |result| {
-            morton_code_tx.send(result).unwrap();
-        });
-        device.poll(Maintain::Wait);
-        if let Some(Ok(())) = morton_code_rx.receive().await {
-            let morton_code_data = morton_code_readback_slice.get_mapped_range();
-            let morton_codes: Vec<u64> = bytemuck::cast_slice(&morton_code_data).to_vec();
-            drop(morton_code_data);
-            morton_code_readback_b.unmap();
-            let mut file = File::create("morton_codes.txt").unwrap();
-            for &value in &morton_codes {
-                let line = format!("{}\n", value);
-                file.write_all(&line.as_bytes()).unwrap();
-            }
-
-            let mut file_2 = File::create("indices.txt").unwrap();
-
-            for triangle in _triangles_copy.triangles {
-                let line = format!(
-                    "({}, {}, {})\n",
-                    triangle.indices.x, triangle.indices.y, triangle.indices.z
-                );
-                // Write bytes to file
-                file_2.write_all(&line.as_bytes()).unwrap();
-            }
-        } else {
-            panic!("failed to run compute on GPU!!!!!");
-        }
-    }
-
-    #[cfg(radix_sort_readback)]
-    {
-        let radix_sort_morton_codes_2_readback_slice =
-            radix_sort_morton_codes_2_readback_b.slice(..);
-        // NOTE: We have to create the mapping THEN device.poll() before awaiting
-        // the future. Otherwise the application will freeze.
-        let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
-        radix_sort_morton_codes_2_readback_slice.map_async(MapMode::Read, move |result| {
-            tx.send(result).unwrap();
-        });
-
-        let radix_sort_morton_codes_readback_slice = radix_sort_morton_codes_readback_b.slice(..);
-        let (tx2, rx2) = futures_intrusive::channel::shared::oneshot_channel();
-        radix_sort_morton_codes_readback_slice.map_async(MapMode::Read, move |result| {
-            tx2.send(result).unwrap();
-        });
-
-        device.poll(Maintain::Wait);
-        if let (Some(Ok(())), Some(Ok(()))) = (rx.receive().await, rx2.receive().await) {
-            let radix_sort_morton_codes_readback_data =
-                radix_sort_morton_codes_readback_slice.get_mapped_range();
-            let radix_sort_morton_codes: Vec<u64> =
-                bytemuck::cast_slice(&radix_sort_morton_codes_readback_data).to_vec();
-            drop(radix_sort_morton_codes_readback_data);
-            radix_sort_morton_codes_readback_b.unmap();
-
-            let radix_sort_morton_codes_2_readback_data =
-                radix_sort_morton_codes_2_readback_slice.get_mapped_range();
-            let radix_sort_morton_codes_2: Vec<u64> =
-                bytemuck::cast_slice(&radix_sort_morton_codes_2_readback_data).to_vec();
-            drop(radix_sort_morton_codes_2_readback_data);
-            radix_sort_morton_codes_2_readback_b.unmap();
-
-            // let mut set = HashSet::new();
-            // for (i, c) in radix_sort_morton_codes_2.iter().enumerate() {
-            //     let new = set.insert(*c);
-            //     if !new {
-            //         println!("already in set");
-            //     }
-            //     if *c > 1500 {
-            //         println!("i: {}, c: {}", i, *c);
-            //     } else {
-            //         println!("{}", *c);
-            //     }
-            // }
-            // println!("set size {}", set.len());
-
-            let mut sorted = true;
-            let mut all_zero = true;
-            let mut times_unsorted = 0u32;
-            for (x, i) in radix_sort_morton_codes.windows(2).enumerate() {
-                if x == 0 {
-                    println!("-----------------");
-                }
-                let before = i[0] & 255;
-                let after = i[1] & 255;
-                println!("{:6}, {:#018x}", x, before);
-                if before > after {
-                    times_unsorted += 1;
-                    println!("not sorted!");
-                    println!("bef: {:#018x}", before);
-                    println!("aft: {:#018x}", after);
-                    println!("xor: {:#018x}", before ^ after);
-                    //println!("leading_zeros: {}", (before ^ after).leading_zeros());
-                    sorted = false;
-                }
-                if before != 0u64 {
-                    all_zero = false;
-                }
-                if after != 0u64 {
-                    all_zero = false;
-                }
-            }
-            if !sorted {
-                log::error!("Not sorted!!! {}", times_unsorted);
-            } else {
-                println!("Sorted !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-            }
-            if all_zero {
-                log::error!("all zero!!!");
-            }
-
-            // for (i, chunk) in radix_sort_morton_codes.chunks(256).enumerate() {
-            //     let mut digits = [0; 256];
-            //     chunk.iter().enumerate().for_each(|(i, x)| {
-            //         digits[i] = x & 255;
-            //     });
-            //     let wrong: &[u64] = radix_sort_morton_codes_2.chunks(256).nth(i).unwrap();
-            //     let mut true_local_offset = [0; 256];
-            //     let mut digit_count = [0; 256];
-            //     for (i, digit) in digits.iter().enumerate() {
-            //         true_local_offset[i] = digit_count[*digit as usize];
-            //         digit_count[*digit as usize] += 1;
-            //     }
-
-            //     let mut error_count = 0;
-            //     for (j, val) in wrong.iter().enumerate() {
-            //         if *val != true_local_offset[j] {
-            //             println!("error {} {}", *val, true_local_offset[j]);
-            //             error_count += 1;
-            //         } else {
-            //             println!("{} {}", *val, true_local_offset[j]);
-            //         }
-            //     }
-            //     println!("num errors {}", error_count);
-            //     let mut histogram = [0; 256];
-            //     for (i, digit) in digits.iter().enumerate() {
-            //         if i < chunk.len() {
-            //             histogram[*digit as usize] += 1;
-            //         }
-            //     }
-            //     let p_sum: Vec<u32> = histogram
-            //         .iter()
-            //         .scan(0u32, |state, &x| {
-            //             *state += x;
-            //             Some(*state - x)
-            //         })
-            //         .collect();
-            //     let mut sorted_output = [0; 256];
-            //     digits.iter().enumerate().for_each(|(index, val)| {
-            //         let f = p_sum[*val as usize] + true_local_offset[index] as u32;
-            //         sorted_output[f as usize] = digits[index];
-            //     });
-            //     println!("sorted: {:?}", sorted_output);
-            // }
-
-            // Testing the radix sort with 1500 elements.
-            // let num_codes: u32 = 1500;
-            // let mut radix_sort_codes: Vec<u64> = vec![];
-            // // Creating a distribution of different values.
-            // for i in 0..15 {
-            //     radix_sort_codes.extend(vec![i; 100]);
-            // }
-            // assert_eq!(radix_sort_codes.len() as u32, num_codes);
-
-            // This is the device-wide histogram. It has 6 arrays of 256, where 256 = 2^8 where we are considering
-            // 8 bits in the radix sort. We have 6 groups of 256. 6 * 256 = 1,536, which is greater than 1500.
-            // Because not all chunks will be filled to their limit, we have to make sure to limit our prefix sum
-            // to the chunk size. Call this check "Check A".
-            if false {
-                let mut storage_histogram_cpu = [[0u32; 256]; 6];
-                assert_eq!(calculate_number_of_workgroups_u32(NUM_TRIANGLES, 256), 6);
-                for (i, c) in radix_sort_morton_codes.chunks(256).enumerate() {
-                    for val in c {
-                        // incrementing the storage histogram at the current digit value by 1.
-                        storage_histogram_cpu[i][((*val) & 255) as usize] += 1;
-                    }
-                }
-                // performing a prefix sum over our large device-wide histogram.
-                let mut sum = 0;
-                // The order of the iteration is first over the digit values, then over the blocks.
-                // This is best illustrated with an example - suppose we have the digit 3 somewhere in block 4.
-                // Then, the final location will be equal to the sum of digit values [0,2] in all blocks [0, 5], as well
-                // as the sum of digit value 3 in blocks [0, 4).
-
-                // Also note this an exclusive prefix sum, not inclusive.
-                for k in 0..256 {
-                    for j in 0..6 {
-                        let g = storage_histogram_cpu[j][k];
-                        storage_histogram_cpu[j][k] = sum;
-                        sum += g;
-                    }
-                }
-                //println!("{:?}", storage_histogram_cpu);
-                // now we are going to calculate a prefix sum per block histogram.
-                let mut block_prefix_sums = vec![];
-                for (index, chunk) in radix_sort_morton_codes.chunks(256).enumerate() {
-                    // // first, we find the digits in our current chunk.
-                    // let mut digits = [0; 256];
-                    // chunk.iter().enumerate().for_each(|(i, x)| {
-                    //     digits[i] = x & 255;
-                    // });
-
-                    let mut digits = [0u32; 256];
-                    let mut output = [0u32; 256];
-                    for (i, &val) in chunk.iter().enumerate() {
-                        output[i] += digits[(val & 255) as usize];
-                        digits[(val & 255) as usize] += 1;
-                    }
-                    let x: Vec<u32> = output.iter().map(|x| *x as u32).collect();
-                    block_prefix_sums.push(x);
-                    // then, we compute a histogram over those digit values.
-                    // let mut histogram = [0; 256];
-                    // for (i, digit) in digits.iter().enumerate() {
-                    //     // This is the "Check A" that is necessary. Digits is always of length 256, but for the final
-                    //     // block it's only going to be of length 220 = (1500 - (5 * 256)).
-                    //     if i < chunk.len() {
-                    //         histogram[*digit as usize] += 1;
-                    //     }
-                    // }
-
-                    // // Now we compute the block prefix sum over the histogram. Note that this is also an exclusive sum.
-                    // let block_prefix_sum: Vec<u32> = histogram
-                    //     .iter()
-                    //     .scan(0u32, |state, &x| {
-                    //         *state += x;
-                    //         Some(*state - x)
-                    //     })
-                    //     .collect();
-                    // block_prefix_sums.push(histogram);
-                }
-                // We iterate over our values one more time to check whether we've calculated them correctly.
-                let mut sorted_cpu = vec![1000; NUM_TRIANGLES as usize];
-                let mut set = HashSet::new();
-                for (i, c) in radix_sort_morton_codes.chunks(256).enumerate() {
-                    // One chunk at a time
-                    for (j, code) in c.iter().enumerate() {
-                        let gpu_vals = radix_sort_morton_codes_2.chunks(256).nth(i).unwrap()[j];
-                        let local_offset = gpu_vals >> 16;
-                        let storage_histogram = gpu_vals & 65535;
-                        let digit = *code & 255;
-                        // We know that the block prefix sum + device-wide prefix sum should be less than the size of the
-                        // overall array we're sorting.
-                        let cpu_final_loc =
-                            block_prefix_sums[i][j] + storage_histogram_cpu[i][digit as usize];
-                        // if storage_histogram_cpu[i][digit as usize] != storage_histogram as u32 {
-                        //     println!(" ISSUE )))))))))))))))))))))))))))))))))")
-                        // }
-                        if cpu_final_loc != (local_offset + storage_histogram) as u32 {
-                            println!(
-                                "!!!!!!!!!!!!! cpu: {} + {}, gpu: {} + {}",
-                                block_prefix_sums[i][j],
-                                storage_histogram_cpu[i][digit as usize],
-                                local_offset,
-                                storage_histogram
-                            );
-                        }
-                        let new = set.insert(cpu_final_loc);
-                        if cpu_final_loc >= NUM_TRIANGLES {
-                            // We are reaching this line at the end of the program with the values 120, 1400, 5, 14.
-                            println!(
-                            " CPU CALCULATION WRONG block_prefix_sum: {} storage_histogram_cpu: {} i: {}, digit: {}",
-                            block_prefix_sums[i][j],
-                            storage_histogram_cpu[i][digit as usize],
-                            i,
-                            digit
-                        );
-                        }
-                        sorted_cpu[cpu_final_loc as usize] = digit;
-                    }
-                    println!("-----");
-                }
-                println!("set size: {}", set.len());
-                println!("{:?}", sorted_cpu);
-            }
-        } else {
-            panic!("failed to run compute on GPU!!!!!");
-        }
-    }
-}
-
 pub fn run_compute_shaders(device: &Device, mut encoder: &mut CommandEncoder) -> Vec<Buffer> {
     let number_of_workgroups =
         calculate_number_of_workgroups_u32(NUM_TRIANGLES, ITEMS_PER_HISTOGRAM_PASS);
@@ -919,7 +586,7 @@ pub fn run_compute_shaders(device: &Device, mut encoder: &mut CommandEncoder) ->
         compute_pass.set_pipeline(&morton_code_p);
         compute_pass.set_bind_group(0, &morton_code_bg, &[]);
         compute_pass.insert_debug_marker("compute morton code");
-        let num_workgroups_x = div_ceil_u32(div_ceil_u32(NUM_TRIANGLES, 256), 8);
+        let num_workgroups_x = div_ceil_u32(NUM_TRIANGLES, 2048);
         //println!("num_workgroups_x {}", num_workgroups_x);
         compute_pass.dispatch_workgroups(num_workgroups_x, 8, 1);
     }
@@ -990,7 +657,6 @@ pub fn run_compute_shaders(device: &Device, mut encoder: &mut CommandEncoder) ->
             let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("Indexing"),
             });
-            let num_index_passes = calculate_number_of_workgroups_u32(NUM_TRIANGLES, 256 * 8);
             compute_pass.set_pipeline(&radix_index_p);
             compute_pass.set_bind_group(0, &radix_index_bgs[i as usize], &[]);
             compute_pass.insert_debug_marker("index");
@@ -1021,11 +687,367 @@ pub fn run_compute_shaders(device: &Device, mut encoder: &mut CommandEncoder) ->
     return vec![];
 }
 
+async fn run_headless() {
+    env_logger::init();
+    let instance = Instance::new(InstanceDescriptor {
+        backends: Backends::all(),
+        dx12_shader_compiler: Default::default(),
+    });
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions {
+            power_preference: PowerPreference::default(),
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        })
+        .await
+        .unwrap();
+    let (device, queue) = adapter
+        .request_device(&Default::default(), None)
+        .await
+        .unwrap();
+    let info = adapter.get_info();
+    log::info!("backend: {:?}", info.backend);
+
+    device.on_uncaptured_error(Box::new(move |error| {
+        log::error!("{}", &error);
+        panic!(
+            "wgpu error (handling all wgpu errors as fatal):\n{:?}\n{:?}",
+            &error, &info,
+        );
+    }));
+    device.start_capture();
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("command encoder"),
+    });
+
+    #[allow(unused_variables)]
+    let readback_buffers = run_compute_shaders(&device, &mut encoder);
+
+    queue.submit(Some(encoder.finish()));
+
+    device.stop_capture();
+    #[cfg(radix_sort_readback)]
+    let radix_sort_morton_codes_readback_b = &readback_buffers[0];
+    #[cfg(radix_sort_readback)]
+    let radix_sort_morton_codes_2_readback_b = &readback_buffers[1];
+
+    #[cfg(morton_code_readback)]
+    {
+        let morton_code_readback_slice = morton_code_readback_b.slice(..);
+        // NOTE: We have to create the mapping THEN device.poll() before await
+        // the future. Otherwise the application will freeze.
+        let (morton_code_tx, morton_code_rx) =
+            futures_intrusive::channel::shared::oneshot_channel();
+        morton_code_readback_slice.map_async(MapMode::Read, move |result| {
+            morton_code_tx.send(result).unwrap();
+        });
+        device.poll(Maintain::Wait);
+        if let Some(Ok(())) = morton_code_rx.receive().await {
+            let morton_code_data = morton_code_readback_slice.get_mapped_range();
+            let morton_codes: Vec<u64> = bytemuck::cast_slice(&morton_code_data).to_vec();
+            drop(morton_code_data);
+            morton_code_readback_b.unmap();
+            let mut file = File::create("morton_codes.txt").unwrap();
+            for &value in &morton_codes {
+                let line = format!("{}\n", value);
+                file.write_all(&line.as_bytes()).unwrap();
+            }
+
+            let mut file_2 = File::create("indices.txt").unwrap();
+
+            for triangle in _triangles_copy.triangles {
+                let line = format!(
+                    "({}, {}, {})\n",
+                    triangle.indices.x, triangle.indices.y, triangle.indices.z
+                );
+                // Write bytes to file
+                file_2.write_all(&line.as_bytes()).unwrap();
+            }
+        } else {
+            panic!("failed to run compute on GPU!!!!!");
+        }
+    }
+
+    #[cfg(radix_sort_readback)]
+    {
+        let radix_sort_morton_codes_2_readback_slice =
+            radix_sort_morton_codes_2_readback_b.slice(..);
+        // NOTE: We have to create the mapping THEN device.poll() before awaiting
+        // the future. Otherwise the application will freeze.
+        let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
+        radix_sort_morton_codes_2_readback_slice.map_async(MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+
+        let radix_sort_morton_codes_readback_slice = radix_sort_morton_codes_readback_b.slice(..);
+        let (tx2, rx2) = futures_intrusive::channel::shared::oneshot_channel();
+        radix_sort_morton_codes_readback_slice.map_async(MapMode::Read, move |result| {
+            tx2.send(result).unwrap();
+        });
+
+        device.poll(Maintain::Wait);
+        if let (Some(Ok(())), Some(Ok(()))) = (rx.receive().await, rx2.receive().await) {
+            let radix_sort_morton_codes_readback_data =
+                radix_sort_morton_codes_readback_slice.get_mapped_range();
+            let radix_sort_morton_codes: Vec<u64> =
+                bytemuck::cast_slice(&radix_sort_morton_codes_readback_data).to_vec();
+            drop(radix_sort_morton_codes_readback_data);
+            radix_sort_morton_codes_readback_b.unmap();
+
+            let radix_sort_morton_codes_2_readback_data =
+                radix_sort_morton_codes_2_readback_slice.get_mapped_range();
+            let radix_sort_morton_codes_2: Vec<u64> =
+                bytemuck::cast_slice(&radix_sort_morton_codes_2_readback_data).to_vec();
+            drop(radix_sort_morton_codes_2_readback_data);
+            radix_sort_morton_codes_2_readback_b.unmap();
+
+            // let mut set = HashSet::new();
+            // for (i, c) in radix_sort_morton_codes_2.iter().enumerate() {
+            //     let new = set.insert(*c);
+            //     if !new {
+            //         println!("already in set");
+            //     }
+            //     if *c > 1500 {
+            //         println!("i: {}, c: {}", i, *c);
+            //     } else {
+            //         println!("{}", *c);
+            //     }
+            // }
+            // println!("set size {}", set.len());
+
+            let output_vec = if NUM_PASSES % 2 == 0 {
+                &radix_sort_morton_codes
+            } else {
+                &radix_sort_morton_codes_2
+            };
+
+            let last_pass_vec = if NUM_PASSES % 2 == 0 {
+                &radix_sort_morton_codes_2
+            } else {
+                &radix_sort_morton_codes
+            };
+
+            let mut sorted = true;
+            let mut all_zero = true;
+            let mut times_unsorted = 0u32;
+            for (x, i) in output_vec.windows(2).enumerate() {
+                if x == 0 {
+                    println!("-----------------");
+                }
+                let before = select_bits(i[0], NUM_PASSES);
+                let after = select_bits(i[1], NUM_PASSES);
+                println!("{:6}, {:#018x}", x, before);
+                if before > after {
+                    times_unsorted += 1;
+                    println!("not sorted!");
+                    println!("bef: {:#018x}", before);
+                    println!("aft: {:#018x}", after);
+                    println!("xor: {:#018x}", before ^ after);
+                    //println!("leading_zeros: {}", (before ^ after).leading_zeros());
+                    sorted = false;
+                }
+                if before != 0u64 {
+                    all_zero = false;
+                }
+                if after != 0u64 {
+                    all_zero = false;
+                }
+            }
+            if !sorted {
+                log::error!("Not sorted!!! {}", times_unsorted);
+            } else {
+                println!("Sorted !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            }
+            if all_zero {
+                log::error!("all zero!!!");
+            }
+
+            // for (i, chunk) in radix_sort_morton_codes.chunks(256).enumerate() {
+            //     let mut digits = [0; 256];
+            //     chunk.iter().enumerate().for_each(|(i, x)| {
+            //         digits[i] = x & 255;
+            //     });
+            //     let wrong: &[u64] = radix_sort_morton_codes_2.chunks(256).nth(i).unwrap();
+            //     let mut true_local_offset = [0; 256];
+            //     let mut digit_count = [0; 256];
+            //     for (i, digit) in digits.iter().enumerate() {
+            //         true_local_offset[i] = digit_count[*digit as usize];
+            //         digit_count[*digit as usize] += 1;
+            //     }
+
+            //     let mut error_count = 0;
+            //     for (j, val) in wrong.iter().enumerate() {
+            //         if *val != true_local_offset[j] {
+            //             println!("error {} {}", *val, true_local_offset[j]);
+            //             error_count += 1;
+            //         } else {
+            //             println!("{} {}", *val, true_local_offset[j]);
+            //         }
+            //     }
+            //     println!("num errors {}", error_count);
+            //     let mut histogram = [0; 256];
+            //     for (i, digit) in digits.iter().enumerate() {
+            //         if i < chunk.len() {
+            //             histogram[*digit as usize] += 1;
+            //         }
+            //     }
+            //     let p_sum: Vec<u32> = histogram
+            //         .iter()
+            //         .scan(0u32, |state, &x| {
+            //             *state += x;
+            //             Some(*state - x)
+            //         })
+            //         .collect();
+            //     let mut sorted_output = [0; 256];
+            //     digits.iter().enumerate().for_each(|(index, val)| {
+            //         let f = p_sum[*val as usize] + true_local_offset[index] as u32;
+            //         sorted_output[f as usize] = digits[index];
+            //     });
+            //     println!("sorted: {:?}", sorted_output);
+            // }
+
+            // Testing the radix sort with 1500 elements.
+            // let num_codes: u32 = 1500;
+            // let mut radix_sort_codes: Vec<u64> = vec![];
+            // // Creating a distribution of different values.
+            // for i in 0..15 {
+            //     radix_sort_codes.extend(vec![i; 100]);
+            // }
+            // assert_eq!(radix_sort_codes.len() as u32, num_codes);
+
+            // This is the device-wide histogram. It has 6 arrays of 256, where 256 = 2^8 where we are considering
+            // 8 bits in the radix sort. We have 6 groups of 256. 6 * 256 = 1,536, which is greater than 1500.
+            // Because not all chunks will be filled to their limit, we have to make sure to limit our prefix sum
+            // to the chunk size. Call this check "Check A".
+            if false {
+                let mut storage_histogram_cpu = [[0u32; 256]; 6];
+                assert_eq!(calculate_number_of_workgroups_u32(NUM_TRIANGLES, 256), 6);
+                for (i, c) in radix_sort_morton_codes.chunks(256).enumerate() {
+                    for val in c {
+                        // incrementing the storage histogram at the current digit value by 1.
+                        storage_histogram_cpu[i][((*val) & 255) as usize] += 1;
+                    }
+                }
+                // performing a prefix sum over our large device-wide histogram.
+                let mut sum = 0;
+                // The order of the iteration is first over the digit values, then over the blocks.
+                // This is best illustrated with an example - suppose we have the digit 3 somewhere in block 4.
+                // Then, the final location will be equal to the sum of digit values [0,2] in all blocks [0, 5], as well
+                // as the sum of digit value 3 in blocks [0, 4).
+
+                // Also note this an exclusive prefix sum, not inclusive.
+                for k in 0..256 {
+                    for j in 0..6 {
+                        let g = storage_histogram_cpu[j][k];
+                        storage_histogram_cpu[j][k] = sum;
+                        sum += g;
+                    }
+                }
+                //println!("{:?}", storage_histogram_cpu);
+                // now we are going to calculate a prefix sum per block histogram.
+                let mut block_prefix_sums = vec![];
+                for (index, chunk) in radix_sort_morton_codes.chunks(256).enumerate() {
+                    // // first, we find the digits in our current chunk.
+                    // let mut digits = [0; 256];
+                    // chunk.iter().enumerate().for_each(|(i, x)| {
+                    //     digits[i] = x & 255;
+                    // });
+
+                    let mut digits = [0u32; 256];
+                    let mut output = [0u32; 256];
+                    for (i, &val) in chunk.iter().enumerate() {
+                        output[i] += digits[(val & 255) as usize];
+                        digits[(val & 255) as usize] += 1;
+                    }
+                    let x: Vec<u32> = output.iter().map(|x| *x as u32).collect();
+                    block_prefix_sums.push(x);
+                    // then, we compute a histogram over those digit values.
+                    // let mut histogram = [0; 256];
+                    // for (i, digit) in digits.iter().enumerate() {
+                    //     // This is the "Check A" that is necessary. Digits is always of length 256, but for the final
+                    //     // block it's only going to be of length 220 = (1500 - (5 * 256)).
+                    //     if i < chunk.len() {
+                    //         histogram[*digit as usize] += 1;
+                    //     }
+                    // }
+
+                    // // Now we compute the block prefix sum over the histogram. Note that this is also an exclusive sum.
+                    // let block_prefix_sum: Vec<u32> = histogram
+                    //     .iter()
+                    //     .scan(0u32, |state, &x| {
+                    //         *state += x;
+                    //         Some(*state - x)
+                    //     })
+                    //     .collect();
+                    // block_prefix_sums.push(histogram);
+                }
+                // We iterate over our values one more time to check whether we've calculated them correctly.
+                let mut sorted_cpu = vec![1000; NUM_TRIANGLES as usize];
+                let mut set = HashSet::new();
+                for (i, c) in radix_sort_morton_codes.chunks(256).enumerate() {
+                    // One chunk at a time
+                    for (j, code) in c.iter().enumerate() {
+                        let gpu_vals = radix_sort_morton_codes_2.chunks(256).nth(i).unwrap()[j];
+                        let local_offset = gpu_vals >> 16;
+                        let storage_histogram = gpu_vals & 65535;
+                        let digit = *code & 255;
+                        // We know that the block prefix sum + device-wide prefix sum should be less than the size of the
+                        // overall array we're sorting.
+                        let cpu_final_loc =
+                            block_prefix_sums[i][j] + storage_histogram_cpu[i][digit as usize];
+                        // if storage_histogram_cpu[i][digit as usize] != storage_histogram as u32 {
+                        //     println!(" ISSUE )))))))))))))))))))))))))))))))))")
+                        // }
+                        if cpu_final_loc != (local_offset + storage_histogram) as u32 {
+                            println!(
+                                "!!!!!!!!!!!!! cpu: {} + {}, gpu: {} + {}",
+                                block_prefix_sums[i][j],
+                                storage_histogram_cpu[i][digit as usize],
+                                local_offset,
+                                storage_histogram
+                            );
+                        }
+                        let new = set.insert(cpu_final_loc);
+                        if cpu_final_loc >= NUM_TRIANGLES {
+                            // We are reaching this line at the end of the program with the values 120, 1400, 5, 14.
+                            println!(
+                            " CPU CALCULATION WRONG block_prefix_sum: {} storage_histogram_cpu: {} i: {}, digit: {}",
+                            block_prefix_sums[i][j],
+                            storage_histogram_cpu[i][digit as usize],
+                            i,
+                            digit
+                        );
+                        }
+                        sorted_cpu[cpu_final_loc as usize] = digit;
+                    }
+                    println!("-----");
+                }
+                println!("set size: {}", set.len());
+                println!("{:?}", sorted_cpu);
+            }
+        } else {
+            panic!("failed to run compute on GPU!!!!!");
+        }
+    }
+}
+
 fn main() {
     #[cfg(radix_sort_readback)]
     pollster::block_on(run_headless());
     #[cfg(not(any(radix_sort_readback, morton_code_readback)))]
     pollster::block_on(state::run());
+}
+
+fn select_bits(value: u64, i: u32) -> u64 {
+    if i < 1 || i > 8 {
+        panic!("Input must be between 1 and 8");
+    }
+    if i == 8 {
+        value
+    } else {
+        value & ((1 << (i * 8)) - 1)
+    }
 }
 
 #[cfg(test)]
