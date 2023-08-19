@@ -509,8 +509,8 @@ async fn run_headless() {
                 if x == 0 {
                     println!("-----------------");
                 }
-                let before = i[0];
-                let after = i[1];
+                let before = i[0] & 255;
+                let after = i[1] & 255;
                 println!("{:6}, {:#018x}", x, before);
                 if before > after {
                     times_unsorted += 1;
@@ -919,7 +919,7 @@ pub fn run_compute_shaders(device: &Device, mut encoder: &mut CommandEncoder) ->
         compute_pass.set_pipeline(&morton_code_p);
         compute_pass.set_bind_group(0, &morton_code_bg, &[]);
         compute_pass.insert_debug_marker("compute morton code");
-        let num_workgroups_x = div_ceil_u32(div_ceil_u32(NUM_TRIANGLES, 2048), 8);
+        let num_workgroups_x = div_ceil_u32(div_ceil_u32(NUM_TRIANGLES, 256), 8);
         //println!("num_workgroups_x {}", num_workgroups_x);
         compute_pass.dispatch_workgroups(num_workgroups_x, 8, 1);
     }
@@ -990,6 +990,7 @@ pub fn run_compute_shaders(device: &Device, mut encoder: &mut CommandEncoder) ->
             let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("Indexing"),
             });
+            let num_index_passes = calculate_number_of_workgroups_u32(NUM_TRIANGLES, 256 * 8);
             compute_pass.set_pipeline(&radix_index_p);
             compute_pass.set_bind_group(0, &radix_index_bgs[i as usize], &[]);
             compute_pass.insert_debug_marker("index");

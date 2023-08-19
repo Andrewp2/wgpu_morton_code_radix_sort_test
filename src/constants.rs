@@ -1,6 +1,6 @@
-pub const NUM_VERTICES: u32 = 500000u32;
+pub const NUM_VERTICES: u32 = 1000u32;
 
-pub const NUM_TRIANGLES: u32 = 1500000u32;
+pub const NUM_TRIANGLES: u32 = 3000u32;
 
 pub const BITS_PER_PASS: u32 = 8;
 
@@ -16,6 +16,6 @@ pub const ITEMS_PER_LARGE_PREFIX: u32 = 256u32;
 
 pub const MAX_ITEMS_IN_SMALL_PREFIX: u32 = 1024u32;
 
-pub const NUM_PASSES: u32 = 8;
+pub const NUM_PASSES: u32 = 1;
 
 pub const RNG_SEED: u64 = 7;

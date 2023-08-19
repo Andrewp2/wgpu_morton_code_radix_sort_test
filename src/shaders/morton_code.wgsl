@@ -45,7 +45,7 @@ fn translate_coords_lut(i: i32, byte: i32, first_or_last: i32) -> i32 {
     return starting_point + add + first_or_last;
 }
 
-@compute @workgroup_size(256, 1, 1)
+@compute @workgroup_size(32, 1, 1)
 fn morton_code(
     @builtin(global_invocation_id) invocation_id: vec3<u32>,
     @builtin(local_invocation_id) workgroup_id: vec3<u32>,
@@ -87,7 +87,7 @@ fn morton_code(
     }
 }
 
-@compute @workgroup_size(256, 1, 1)
+@compute @workgroup_size(32, 1, 1)
 fn morton_code_unrolled(
     @builtin(global_invocation_id) invocation_id: vec3<u32>,
     @builtin(local_invocation_id) workgroup_id: vec3<u32>,

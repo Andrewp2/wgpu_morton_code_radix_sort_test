@@ -241,7 +241,6 @@ fn block_offset(wid: u32, digit: u32, id: u32) {
         }
         workgroupBarrier();
     }
-    workgroupBarrier();
     var count: u32 = 0u;
     let full_u32s: u32 = ((wid + 1u) / 32u);
     let remaining_bits = ((wid + 1u) % 32u);
@@ -261,6 +260,7 @@ fn radix_sort_index(
 ) {
     let id = invocation_id.x;
     let wid = workgroup_id.x;
+    let num_blocks_before_this: u32 = id / 256u;
     let num_elements = arrayLength(&codes) / 2u;
     var code_1 = 0u;
     var code_2 = 0u;
@@ -279,7 +279,6 @@ fn radix_sort_index(
     workgroupBarrier();
     if id < num_elements {
         let tri = triangles[wid];
-        let num_blocks_before_this: u32 = id / 256u;
         let histogram_column = num_blocks_before_this;
         let histogram_row = digit;
         let histogram_index = (num_workgroups.x * histogram_row) + histogram_column;
